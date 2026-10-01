@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><link rel="stylesheet" href="../src/style.css" /></head>
+  <body style="margin:0">
+    <div id="host" style="position:absolute;inset:0 320px 0 0"></div>
+    <aside class="side wide" style="position:absolute;top:0;right:0;bottom:0;width:320px;overflow:auto;padding:10px">
+      <div class="twin" id="twin"></div>
+    </aside>
+    <script type="module">
+      import * as THREE from "three";
+      import { Viewport } from "../src/viewer.js";
+      import { RoomModel } from "../src/room.js";
+      import { TwinPanel, loadTwinStyle, buildTwinGeometry, offsetRing, bandOffsets } from "../src/twin.js";
+
+      const room = await (await fetch("/api/room/" + (new URLSearchParams(location.search).get("room") || "libra_lab"))).json();
+      const v = new Viewport(document.querySelector("#host"), { accent: 0x4dd6a8 });
+      const rm = new RoomModel(room);
+      v.scene.add(rm.group);
+      const style = loadTwinStyle();
+      const apply = () => {
+        rm.setTwinStyle(style);
+        rm.setSolidVisible(true);
+        v.setBackground(style.bg);
+        v.setLighting(style.twinLight ? { ambient: 1.1, key: 1.6, keyPos: [30, -25, 50] } : null);
+      };
+      const panel = new TwinPanel(document.querySelector("#twin"), style, apply);
+      apply();
+      v.frame(rm.box, 1.6);
+
+      window.__room = room;
+      window.__style = style;
+      window.__apply = (patch) => { Object.assign(style, patch); panel.set(style); apply(); };
+      window.__geom = () => {
+        const { walls, floor, ceil } = buildTwinGeometry(room.footprint, room.height, style);
+        const out = {};
+        for (const [k, g] of Object.entries({ walls, floor, ceil })) {
+          if (!g) { out[k] = null; continue; }
+          g.computeBoundingBox();
+          out[k] = {
+            tris: (g.index?.count ?? g.getAttribute("position").count) / 3,
+            min: g.boundingBox.min.toArray().map((n) => +n.toFixed(4)),
+            max: g.boundingBox.max.toArray().map((n) => +n.toFixed(4)),
+          };
+        }
+        return out;
+      };
+      /**
+       * Perpendicular distance from each footprint edge line to the corresponding inner/outer
+       * wall face. Mitred corners overshoot the axis-aligned bounding box, so the face distance
+       * is the invariant that actually says "the wall is this thick, here".
+       */
+      window.__faceDistances = () => {
+        const fp = room.footprint;
+        const [dIn, dOut] = bandOffsets(style);
+        const inner = offsetRing(fp, dIn), outer = offsetRing(fp, dOut);
+        const per = [];
+        for (let i = 0; i < fp.length; i++) {
+          const j = (i + 1) % fp.length;
+          const ex = fp[j][0] - fp[i][0], ey = fp[j][1] - fp[i][1];
+          const L = Math.hypot(ex, ey);
+          const nx = ey / L, ny = -ex / L;                 // one edge normal (sign is arbitrary)
+          const mid = [(fp[i][0] + fp[j][0]) / 2, (fp[i][1] + fp[j][1]) / 2];
+          const proj = (ring) => {
+            const m = [(ring[i][0] + ring[j][0]) / 2, (ring[i][1] + ring[j][1]) / 2];
+            return (m[0] - mid[0]) * nx + (m[1] - mid[1]) * ny;
+          };
+          per.push({ inner: +proj(inner).toFixed(6), outer: +proj(outer).toFixed(6) });
+        }
+        return per;
+      };
+      window.__parts = () => ({
+        meshes: rm.solid.children.filter((c) => c.isMesh).length,
+        lines: rm.solid.children.filter((c) => c.isLineSegments).length,
+      });
+      // Camera/nav probes for the fly-navigation e2e.
+      window.__cam = () => v.camera.position.toArray();
+      window.__target = () => v.controls.target.toArray();
+      window.__dir = () => { const d = new THREE.Vector3(); v.camera.getWorldDirection(d); return d.toArray(); };
+      window.__navMode = () => v.navMode;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

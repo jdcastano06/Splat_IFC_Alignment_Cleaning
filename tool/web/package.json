@@ -1,0 +1,19 @@
+{
+  "name": "splat-ifc-aligner",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@sparkjsdev/spark": "^0.1.9",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1",
+    "vite": "^6.0.0"
+  }
+}
