@@ -299,6 +299,8 @@ class CropParams(BaseModel):
     ceil_offset: float = 0.0
     ceil_feather: float = 0.0
     height: float | None = None   # overridden ceiling height; None -> use the IFC value
+    max_scale: float = 0.0        # floater filter: drop splats larger than this (room units); 0 = off
+    min_opacity: float = 0.0      # floater filter: drop splats fainter than this; 0 = off
 
 
 class CustomRoom(BaseModel):
@@ -390,6 +392,7 @@ def export(req: ExportReq):
         "floor_offset": req.crop.floor_offset, "floor_feather": req.crop.floor_feather,
         "ceil_offset": req.crop.ceil_offset, "ceil_feather": req.crop.ceil_feather,
         "height": height,
+        "max_scale": req.crop.max_scale, "min_opacity": req.crop.min_opacity,
     }
 
     out_dir = resolve_out_root() / room_key / req.splat_id.replace("/", "__")
@@ -493,6 +496,22 @@ def find_exports() -> list[dict]:
         })
     items.sort(key=lambda x: x.get("created") or "", reverse=True)
     return items
+
+
+@app.post("/api/auto_room/{splat_id:path}")
+def auto_room_box(splat_id: str, force: bool = False):
+    """Detect the room box from the splat alone; returns a reopen-shaped payload for Clean."""
+    import auto_clean  # lazy: auto_clean imports this module
+    s_info = find_splats().get(splat_id)
+    if not s_info:
+        raise HTTPException(404, f"unknown splat {splat_id!r}")
+    try:
+        res, _, _ = auto_clean.detect(splat_id, s_info, force=force)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(422, f"could not detect a room: {e}")
+    return auto_clean.box_payload(splat_id, s_info, res)
 
 
 @app.get("/api/exports")

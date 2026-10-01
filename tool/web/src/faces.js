@@ -31,6 +31,7 @@ export class FacePanel {
       wallFeather: new Float32Array(this.n).fill(0.25),
       floorOffset: 0, floorFeather: 0.1,
       ceilOffset: 0, ceilFeather: 0.25,
+      maxScale: 0, minOpacity: 0,      // floater filter, 0 = off
     };
     // Tracks whether a wall was touched individually, so the master doesn't stomp bespoke values
     // silently -- it still can, but the UI says so.
@@ -76,6 +77,8 @@ export class FacePanel {
     if (c.floor_feather != null) this.params.floorFeather = c.floor_feather;
     if (c.ceil_offset != null) this.params.ceilOffset = c.ceil_offset;
     if (c.ceil_feather != null) this.params.ceilFeather = c.ceil_feather;
+    if (c.max_scale != null) this.params.maxScale = c.max_scale;
+    if (c.min_opacity != null) this.params.minOpacity = c.min_opacity;
     // Flag walls that differ from the master so its override note is accurate on reopen.
     for (let i = 1; i < this.n; i++) {
       if (this.params.wallOffset[i] !== this.params.wallOffset[0]
@@ -99,16 +102,17 @@ export class FacePanel {
 
       const input = document.createElement("input");
       input.type = "range";
-      input.min = spec.min; input.max = spec.max; input.step = 0.01;
+      input.min = spec.min; input.max = spec.max; input.step = spec.step ?? 0.01;
+      const dp = spec.dp ?? 2;
       input.value = get(spec.key);
 
       // The number box is authoritative: type any offset you like, past the slider's range.
       const num = document.createElement("input");
       num.type = "number";
       num.className = "val num";
-      num.step = 0.05;
+      num.step = spec.step ?? 0.05;
       if (spec.hardMin !== undefined) num.min = spec.hardMin;
-      num.value = Number(get(spec.key)).toFixed(2);
+      num.value = Number(get(spec.key)).toFixed(dp);
 
       const commit = (v, from) => {
         if (!Number.isFinite(v)) return;
@@ -116,7 +120,7 @@ export class FacePanel {
         set(spec.key, v);
         // Let the slider ride along, clamped, without clamping the underlying value.
         if (from !== "range") input.value = String(Math.min(Math.max(v, spec.min), spec.max));
-        if (from !== "number") num.value = v.toFixed(2);
+        if (from !== "number") num.value = v.toFixed(dp);
         el.classList.toggle("out-of-range", v < spec.min || v > spec.max);
         this.onChange(this.params);
       };
@@ -139,7 +143,7 @@ export class FacePanel {
     for (const spec of el._ranges) {
       const v = spec.read();
       spec._input.value = String(Math.min(Math.max(v, spec.min), spec.max));
-      spec._num.value = Number(v).toFixed(2);
+      spec._num.value = Number(v).toFixed(spec.dp ?? 2);
       el.classList.toggle("out-of-range", v < spec.min || v > spec.max);
     }
   }
@@ -232,6 +236,23 @@ export class FacePanel {
       ],
     });
     this.host.append(this.ceilRow);
+
+    // ---- floaters: drop oversized needles/blobs and near-invisible haze, wherever they are
+    const fp = this.room.footprint ?? [];
+    const ext = fp.length ? Math.max(
+      Math.max(...fp.map((q) => q[0])) - Math.min(...fp.map((q) => q[0])),
+      Math.max(...fp.map((q) => q[1])) - Math.min(...fp.map((q) => q[1]))) : 10;
+    this.host.append(this._row({
+      name: "Floaters", sub: "0 = off",
+      get: (k) => (k === "size" ? p.maxScale : p.minOpacity),
+      set: (k, v) => { if (k === "size") p.maxScale = v; else p.minOpacity = v; },
+      ranges: [
+        { label: "Max size", key: "size", min: 0, max: +(0.05 * ext).toFixed(3), hardMin: 0,
+          step: +(ext / 2000).toPrecision(2), dp: 3, read: () => p.maxScale },
+        { label: "Min opacity", key: "opacity", min: 0, max: 0.3, hardMin: 0, step: 0.005, dp: 3,
+          read: () => p.minOpacity },
+      ],
+    }));
 
     // Resize control sits at the very top, above "All walls" -- it's the first thing you reach for.
     if (this.rect) this.host.prepend(this._resizeSection());

@@ -29,7 +29,7 @@ function floatTexture(data, width, height, format) {
 
 /** The custom GLSL node: Gsplat in -> Gsplat out, with opacity scaled by cropAlpha(). */
 class CropDyno extends Dyno {
-  constructor({ gsplat, distTex, idxTex, wallTex, grid, gridSize, floorCeil, enabled }) {
+  constructor({ gsplat, distTex, idxTex, wallTex, grid, gridSize, floorCeil, floater, enabled }) {
     super({
       inTypes: {
         gsplat: Gsplat,
@@ -39,10 +39,11 @@ class CropDyno extends Dyno {
         grid: "vec4",
         gridSize: "vec2",
         floorCeil: "vec4",
+        floater: "vec2",
         enabled: "float",
       },
       outTypes: { gsplat: Gsplat },
-      inputs: { gsplat, distTex, idxTex, wallTex, grid, gridSize, floorCeil, enabled },
+      inputs: { gsplat, distTex, idxTex, wallTex, grid, gridSize, floorCeil, floater, enabled },
       globals: () => [defineGsplat, CROP_GLSL],
       statements: ({ inputs, outputs }) => {
         const o = outputs.gsplat;
@@ -65,6 +66,7 @@ class CropDyno extends Dyno {
           `${o} = ${i.gsplat};`,
           `float _a = cropAlpha(${o}.center, ${i.distTex}, ${i.idxTex}, ${i.wallTex},`,
           `                     ${i.grid}, ${i.gridSize}, ${i.floorCeil});`,
+          `_a *= floaterKeep(${o}.scales, ${o}.rgba.a, ${i.floater});`,
           `_a = mix(1.0, _a, ${i.enabled});`,
           `${o}.rgba.a *= _a;`,
           // Fully-faded splats still cost sort + raster; drop them from the pipeline.
@@ -106,6 +108,7 @@ export class CropModifier {
       new THREE.Vector2(meta.width, meta.height));
     this.uFloorCeil = uniform("cropFloorCeil", "vec4",
       new THREE.Vector4(0, 0, height, 0));
+    this.uFloater = uniform("cropFloater", "vec2", new THREE.Vector2(0, 0));
     this.uEnabled = uniform("cropEnabled", "float", 1.0);
 
     this.setParams({
@@ -128,6 +131,7 @@ export class CropModifier {
       this.roomHeight - (p.ceilOffset ?? 0),
       p.ceilFeather ?? 0,
     );
+    this.uFloater.value.set(p.maxScale ?? 0, p.minOpacity ?? 0);
     this.params = p;
     this._invalidate();
   }
@@ -161,6 +165,7 @@ export class CropModifier {
       floor_offset: p.floorOffset, floor_feather: p.floorFeather,
       ceil_offset: p.ceilOffset, ceil_feather: p.ceilFeather,
       height: this.roomHeight, // overridden ceiling height, so the export crops where you see it
+      max_scale: p.maxScale ?? 0, min_opacity: p.minOpacity ?? 0,
     };
   }
 
@@ -174,7 +179,7 @@ export class CropModifier {
           gsplat,
           distTex: this.uDist, idxTex: this.uIdx, wallTex: this.uWall,
           grid: this.uGrid, gridSize: this.uGridSize, floorCeil: this.uFloorCeil,
-          enabled: this.uEnabled,
+          floater: this.uFloater, enabled: this.uEnabled,
         });
         return { gsplat: out };
       },

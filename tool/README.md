@@ -112,6 +112,48 @@ transform. Exports made before this feature show greyed-out (custom boxes can't 
 that block) — re-export one normally to make it reopenable; an entry whose source scan isn't mounted
 is greyed out too.
 
+## Automatic cleaning (no IFC, no clicks)
+
+Most scans have no IFC, so the tool can find the room itself and emit both outputs -- the cleaned
+splat **and** an IFC of the room:
+
+- **In the app:** pick a scan, then **⚡ Auto room** → **Detect room → Clean**. The detected box
+  opens in Clean exactly like a drawn custom box (walls, floor, ceiling, floater filter and twin
+  look pre-set), so you only nudge and **Export**.
+- **Hands-off batch** (from `server/`):
+
+  ```bash
+  python3 auto_clean.py --new                    # every scan with no export yet
+  python3 auto_clean.py "Space_1/Space_1-20260701" ...    # specific scans (ids as listed in the app)
+  python3 auto_clean.py --all --detect-only ../../out/review   # previews only, nothing exported
+  ```
+
+  Each scan gets `auto.ply`, `auto.sog`, `auto.ifc`, `auto.alignment.json` and `auto.preview.png`
+  (plan + elevation of the cut) under `_Cleaned/custom/<scan>/`. The label is `auto`, so a
+  hand-made `cleaned.*` is never overwritten, and every result is listed under **Reopen a cleaned
+  export** for touch-ups.
+
+How the room is found (`server/auto_room.py`):
+
+1. **Manhattan frame.** A flat gaussian's thinnest axis is its surface normal; the three dominant
+   orthogonal normal directions give up (the one nearest +z) and the wall direction. This levels
+   scans that come out tilted (some SOG pipelines are up to ~20° off) and squares the walls to the
+   grid.
+2. **Floor & ceiling.** A safe estimate (outer dense height bins) and a tight one (outermost
+   horizontal-disc slabs, i.e. real floor/ceiling surfaces). Tight wins on a side only when what it
+   trims is negligible -- so floater haze above the ceiling and the mirrored room under a glossy
+   floor are cut, but a mezzanine or a desk never masquerades as the floor.
+3. **Footprint.** Top-down maps of all structure and of the ceiling layer; dense cells are closed,
+   hole-filled (furniture is part of the room), merged and outlined, then simplified (Visvalingam)
+   and snapped to the wall axes -- typically 4–12 corners.
+4. **Floater filter.** Splats larger than 1 % of the room (≈0.1–0.4 % of splats -- the bright
+   needles and blobs) are dropped. It's the **Floaters** row in Clean (max size / min opacity,
+   0 = off) and, like the crop, is the same formula in the preview shader and the export.
+
+Scale stays in scan units (as with a drawn box): scans from 360 video have no metric scale.
+Tuning tools: `tests/tune_auto_room.py` renders plan + elevation contact sheets for every scan;
+`tests/bench_auto_room.py` compares against hand-drawn boxes.
+
 ## How it works
 
 - **Preview from SOG, export from PLY.** They're byte-for-byte the same splats in the same order,
@@ -138,6 +180,7 @@ cd web && node e2e/drive-twin.mjs libra_lab   # twin preview: wall geometry + ho
 cd web && node e2e/drive-twin.mjs machine_shop  # ...and again on the 57-wall room
 cd web && node e2e/drive-alignedit.mjs        # Align: select a pair, drag its points in both panes
 cd web && node e2e/drive-fly.mjs              # fly camera looks in place; orbit re-pivots cleanly
+cd web && node e2e/drive-auto.mjs "Space 7-20260701"   # ⚡ Auto room: detect -> Clean -> crop + twin
 python3 tests/smoke_export.py libra_lab       # full export against the 300 MB PLY (minutes)
 ```
 

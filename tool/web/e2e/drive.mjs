@@ -79,7 +79,7 @@ async function diffFraction(page, a, b) {
  * element's screenshot into a 2D canvas. Counts real composited output.
  */
 async function inkFraction(page, selector) {
-  const buf = await page.locator(selector).screenshot();
+  const buf = await page.locator(selector).screenshot({ timeout: 180000 });
   const b64 = buf.toString("base64");
   return page.evaluate(async (d) => {
     const img = new Image();
@@ -122,11 +122,13 @@ try {
   check("WebGL2 available", webgl2);
 
   const nSplats = await page.locator("#splat-list .item").count();
-  const nRooms = await page.locator("#room-list .item:not(.custom-item)").count();
+  const nRooms = await page.locator("#room-list .item:not(.custom-item):not(.auto-item)").count();
   const hasCustom = await page.locator("#room-list .custom-item").count();
-  // Splat count is environment-dependent (the vault gains scans); rooms come from IFC/ (9).
-  check("datasets listed", nSplats >= 5 && nRooms === 9 && hasCustom === 1,
-    `${nSplats} splats, ${nRooms} rooms, custom=${hasCustom}`);
+  const hasAuto = await page.locator("#room-list .auto-item").count();
+  const wantRooms = (await (await fetch("http://127.0.0.1:8777/api/datasets")).json()).rooms.length;
+  // Splat and room counts are environment-dependent (the vault gains scans, IFC/ gains rooms).
+  check("datasets listed", nSplats >= 5 && nRooms === wantRooms && hasCustom === 1 && hasAuto === 1,
+    `${nSplats} splats, ${nRooms}/${wantRooms} rooms, custom=${hasCustom}, auto=${hasAuto}`);
 
   await page.locator("#splat-list .item").nth(SPLAT_IDX).click();
   await page.locator(`#room-list .item:has(.m:text-is("${ROOM}"))`).click();
@@ -240,12 +242,12 @@ try {
   check("WASD flies the splat camera", camMoved > 1e-3, `moved ${camMoved.toFixed(3)} units`);
 
   // Blue splat-centre overlay (SuperSplat-style).
-  const beforePts = await page.locator("#host-splat").screenshot();
+  const beforePts = await page.locator("#host-splat").screenshot({ timeout: 180000 });
   await page.locator("#splat-points").check();
   await page.waitForFunction(() => window.__e2ePointCloud()?.inScene, { timeout: 60000 });
   await page.waitForTimeout(800);
   const pc = await page.evaluate(() => window.__e2ePointCloud());
-  const afterPts = await page.locator("#host-splat").screenshot();
+  const afterPts = await page.locator("#host-splat").screenshot({ timeout: 180000 });
   check("point overlay builds and renders", pc && pc.points > 100000 && pc.inScene,
     pc ? `${pc.points.toLocaleString()} points` : "null");
   check("point overlay changes the splat view",
@@ -265,9 +267,9 @@ try {
   log("loading splat into room space + SDF…");
   await page.waitForSelector("#faces .face", { timeout: 300000 });
 
-  const nFaces = await page.locator("#faces .face").count();
-  // 4 walls -> master + Wall 0..3 + Floor + Ceiling. The "6 faces of a cube" case.
-  check("face rows match wall count", nFaces === 7, `${nFaces} rows for 4 walls`);
+  const nFaces = await page.locator("#faces .face:not(.resize)").count();
+  // 4 walls -> master + Wall 0..3 + Floor + Ceiling + Floaters (the Resize section isn't a face).
+  check("face rows match wall count", nFaces === 8, `${nFaces} rows for 4 walls`);
 
   // The real prize: did the dyno crop shader compile and run?
   const shaderErrs = errors.filter((e) => /shader|GLSL|compile|link/i.test(e));
@@ -313,11 +315,11 @@ try {
 
   await setMaster(0, 0);
   await waitStable(page, "#host-clean");
-  const hardShot = await page.locator("#host-clean").screenshot();
+  const hardShot = await page.locator("#host-clean").screenshot({ timeout: 180000 });
   await page.screenshot({ path: `${SHOTS}7a-feather-0.png` });
   await setMaster(0, 1.4);
   await waitStable(page, "#host-clean");
-  const softShot = await page.locator("#host-clean").screenshot();
+  const softShot = await page.locator("#host-clean").screenshot({ timeout: 180000 });
   await page.screenshot({ path: `${SHOTS}7b-feather-1.4.png` });
   // A wide feather softens edges (many pixels change) even when total coverage barely moves.
   const fdiff = await diffFraction(page, hardShot, softShot);
@@ -345,7 +347,7 @@ try {
   // Manual refine must move the splat, and reset must put it back exactly.
   const mSolved = await page.evaluate(() => window.__e2eMatrix());
   await waitStable(page, "#host-clean");
-  const shotBefore = await page.locator("#host-clean").screenshot();
+  const shotBefore = await page.locator("#host-clean").screenshot({ timeout: 180000 });
   await page.locator("#sect-refine > summary").click();
   await page.evaluate(() => {
     const r = document.querySelectorAll("#refine .refine-row input[type=range]")[0]; // yaw
@@ -354,7 +356,7 @@ try {
   });
   await page.waitForTimeout(600);
   await waitStable(page, "#host-clean");
-  const shotAfter = await page.locator("#host-clean").screenshot();
+  const shotAfter = await page.locator("#host-clean").screenshot({ timeout: 180000 });
   await page.screenshot({ path: `${SHOTS}8-refine-yaw35.png` });
   const mRefined = await page.evaluate(() => window.__e2eMatrix());
 

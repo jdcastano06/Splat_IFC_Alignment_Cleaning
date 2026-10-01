@@ -79,6 +79,23 @@ def alpha(points: np.ndarray, grid, params: dict) -> np.ndarray:
     return (a_wall * a_floor * a_ceil).astype(np.float32)
 
 
+def floater_keep(scale_max: np.ndarray, opacity: np.ndarray, params: dict) -> np.ndarray:
+    """Floater filter: 0 for oversized or near-invisible splats, else 1. Hard, per splat.
+
+    scale_max -- largest gaussian std-dev axis in room units; opacity -- linear [0,1].
+    params: max_scale (room units, <= 0 = off), min_opacity (<= 0 = off).
+    Applied on the splat's own opacity, before the crop fade, in preview and export alike.
+    """
+    keep = np.ones(np.shape(scale_max), dtype=np.float32)
+    ms = float(params.get("max_scale", 0.0) or 0.0)
+    mo = float(params.get("min_opacity", 0.0) or 0.0)
+    if ms > 0:
+        keep *= (np.asarray(scale_max) < ms).astype(np.float32)
+    if mo > 0:
+        keep *= (np.asarray(opacity) >= mo).astype(np.float32)
+    return keep
+
+
 def default_params(height: float, n_walls: int) -> dict:
     return {
         "wall_offset": np.zeros(n_walls, dtype=np.float32),
@@ -86,4 +103,5 @@ def default_params(height: float, n_walls: int) -> dict:
         "floor_offset": 0.0, "floor_feather": 0.10,
         "ceil_offset": 0.0, "ceil_feather": 0.25,
         "height": float(height),
+        "max_scale": 0.0, "min_opacity": 0.0,
     }

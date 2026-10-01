@@ -158,3 +158,39 @@ def test_glsl_and_js_stay_in_step():
     assert js.count("cropFadeJS(") == 4, "JS should define cropFadeJS and use it 3x"
     for side in (glsl, js):
         assert "aWall" in side and "aFloor" in side and "aCeil" in side
+
+
+def test_floater_filter_js_matches_python(tmp_path):
+    """The floater filter (max size / min opacity) must drop the same splats in preview and export."""
+    rng = np.random.default_rng(11)
+    smax = rng.uniform(0.0, 0.5, 3000)
+    op = rng.uniform(0.0, 1.0, 3000)
+    cases = [(0.0, 0.0), (0.2, 0.0), (0.0, 0.1), (0.2, 0.1)]
+    # exact threshold values are where a >= vs > mismatch would hide
+    smax[:4] = 0.2; op[4:8] = 0.1
+    (tmp_path / "f.json").write_text(json.dumps({"smax": smax.tolist(), "op": op.tolist(), "cases": cases}))
+    driver = tmp_path / "f.mjs"
+    driver.write_text(f"""
+import {{ readFileSync, writeFileSync }} from "node:fs";
+import {{ floaterKeepJS }} from "{(ROOT / 'web' / 'src' / 'crop-shared.js').as_posix()}";
+const d = JSON.parse(readFileSync("{(tmp_path / 'f.json').as_posix()}", "utf8"));
+writeFileSync("{(tmp_path / 'f_out.json').as_posix()}", JSON.stringify(
+  d.cases.map(([ms, mo]) => d.smax.map((s, i) => floaterKeepJS(s, d.op[i], ms, mo)))));
+""")
+    r = subprocess.run([_node(), str(driver)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads((tmp_path / "f_out.json").read_text())
+    for (ms, mo), g in zip(cases, got):
+        want = crop.floater_keep(smax, op, {"max_scale": ms, "min_opacity": mo})
+        assert np.array_equal(np.asarray(g, float), want.astype(float)), (ms, mo)
+    assert crop.floater_keep(smax, op, {"max_scale": 0.2, "min_opacity": 0.1}).mean() < 0.8
+
+
+def test_floater_glsl_is_wired_into_the_crop():
+    """The shader must actually call the filter, on the splat's own opacity, before the crop toggle."""
+    src = (ROOT / "web" / "src" / "crop-dyno.js").read_text()
+    glsl = (ROOT / "web" / "src" / "crop-shared.js").read_text()
+    assert "float floaterKeep(vec3 scales, float a, vec2 floater)" in glsl
+    i_keep, i_mix, i_mul = (src.index("floaterKeep("), src.index("_a = mix(1.0, _a"),
+                            src.index(".rgba.a *= _a"))
+    assert i_keep < i_mix < i_mul

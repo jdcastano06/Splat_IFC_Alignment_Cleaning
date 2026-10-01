@@ -52,6 +52,9 @@ export const api = {
     post("/api/solve", { base_matrix4: baseMatrix4, refine, pivot_height: pivotHeight }),
   export: (body) => post("/api/export", body),
 
+  /** Detect the room box from the splat alone (no IFC). Reopen-shaped payload for Clean. */
+  autoRoom: (id) => j(`/api/auto_room/${id}`, { method: "POST" }),
+
   /** Previously exported cleans, each with a `reload` payload for re-opening in Clean. */
   exports: () => j("/api/exports"),
 };

@@ -25,7 +25,10 @@ def test_rectangle_roundtrips(tmp_path):
     r = ifc_room.extract(out)
     assert len(r.footprint) == 4
     assert r.height == pytest.approx(2.5, abs=1e-4)
-    assert r.area == pytest.approx(6.0, abs=1e-3)
+    # The floor slab is the walls' OUTER ring (ifc_write: it reaches the walls' outer face, as the
+    # Twin preview draws it), so the read-back footprint is the 3 x 2 room grown by t/2 per side.
+    t = 0.1                                          # build_room_ifc's default wall thickness
+    assert r.area == pytest.approx((3 + t) * (2 + t), abs=1e-3)
 
     zmin, zmax, _ = _bbox_z(out)
     assert zmin == pytest.approx(-0.1, abs=1e-3)   # floor slab thickness below z=0

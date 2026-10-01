@@ -162,3 +162,21 @@ def test_feather_produces_partial_alpha_not_just_binary(tmp_path, grid):
     assert ((a > 0.05) & (a < 0.95)).sum() >= 5, "expected a gradient, not a hard edge"
     order = np.argsort(kept[:, 0])
     assert np.all(np.diff(a[order]) <= 1e-6), "alpha must fall monotonically toward the wall"
+
+
+def test_floater_filter_drops_big_and_faint_splats(tmp_path, grid):
+    xyz = np.array([[0.0, 0, 1.5]] * 4)
+    #                 normal  huge   faint   both
+    scale = np.array([[-3.0] * 3, [0.0, -3, -3], [-3.0] * 3, [0.0, -3, -3]])
+    opacity = np.array([2.0, 2.0, -5.0, -5.0])          # sigmoid: 0.88, 0.88, 0.007, 0.007
+    p_in = make_ply(tmp_path, xyz, opacity=opacity, scale=scale)
+    data, props = ply.read(p_in)
+    _, _, n_off = clean.transform_and_crop(data, props, 1.0, np.eye(3), np.zeros(3), grid, params())
+    assert n_off == 4                                   # filter off by default
+    kept, _, n = clean.transform_and_crop(data, props, 1.0, np.eye(3), np.zeros(3), grid,
+                                          params(max_scale=0.5, min_opacity=0.05))
+    assert n == 1                                       # only the normal splat survives
+    # size is judged in room units: a 0.5x similarity shrinks the huge splat under the limit
+    _, _, n_half = clean.transform_and_crop(data, props, 0.4, np.eye(3), np.zeros(3), grid,
+                                            params(max_scale=0.5))
+    assert n_half == 4

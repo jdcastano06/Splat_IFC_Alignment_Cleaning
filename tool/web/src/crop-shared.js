@@ -54,9 +54,25 @@ float cropAlpha(vec3 p, sampler2D distTex, sampler2D idxTex, sampler2D wallTex,
 
   return aWall * aFloor * aCeil;
 }
+
+// Floater filter -- server/crop.py floater_keep(). floater = (maxScale, minOpacity), <= 0 = off.
+// scales: the gaussian's std-dev axes in room units; a: its own linear opacity (pre-crop).
+float floaterKeep(vec3 scales, float a, vec2 floater) {
+  float k = 1.0;
+  if (floater.x > 0.0 && max(scales.x, max(scales.y, scales.z)) >= floater.x) { k = 0.0; }
+  if (floater.y > 0.0 && a < floater.y) { k = 0.0; }
+  return k;
+}
 `;
 
 // ---- JS mirror of the above (tests only) -----------------------------------
+
+export function floaterKeepJS(scaleMax, a, maxScale, minOpacity) {
+  let k = 1;
+  if (maxScale > 0 && scaleMax >= maxScale) k = 0;
+  if (minOpacity > 0 && a < minOpacity) k = 0;
+  return k;
+}
 
 export function cropFadeJS(d, f) {
   if (f <= 1e-9) return d < 0 ? 1 : 0;

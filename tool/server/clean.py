@@ -169,6 +169,10 @@ def transform_and_crop(
         xyz = s * (xyz @ R.T) + t
 
         a = crop.alpha(xyz.astype(np.float32), grid, params)
+        if params.get("max_scale") or params.get("min_opacity"):
+            s_max = np.exp(blk[:, [col["scale_0"], col["scale_1"], col["scale_2"]]].max(1)) * s
+            op = _sigmoid(blk[:, col["opacity"]].astype(np.float64))
+            a = a * crop.floater_keep(s_max, op, params)
         keep = a >= alpha_eps
         if not keep.any():
             continue

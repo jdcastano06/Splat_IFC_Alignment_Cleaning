@@ -148,6 +148,21 @@ async function boot() {
     el.splatList.append(b);
   }
 
+  // "No IFC" option, automatic: the room box is detected from the splat itself.
+  const auto = document.createElement("button");
+  auto.className = "item auto-item";
+  auto.innerHTML = `<div class="n">⚡ Auto room</div>
+    <div class="r">no IFC</div>
+    <div class="m">detect walls, floor &amp; ceiling from the splat — straight to Clean</div>`;
+  auto.addEventListener("click", () => {
+    S.roomId = "__auto__";
+    S.customMode = true;
+    for (const o of el.roomList.children) o.classList.remove("sel");
+    auto.classList.add("sel");
+    refreshChosen();
+  });
+  el.roomList.append(auto);
+
   // "No IFC" option: draw the box yourself on the splat.
   const custom = document.createElement("button");
   custom.className = "item custom-item";
@@ -262,19 +277,20 @@ async function reopenExport(rl) {
   // The look this export was tuned at, so reopening shows the walls you exported, not the last
   // look you happened to leave the panel on.
   if (rl.twin) S.twinStyle = { ...S.twinStyle, ...rl.twin };
-  toast(`Reopening ${rl.room_name} — restoring your clean`);
+  if (!rl.auto) toast(`Reopening ${rl.room_name} — restoring your clean`);
   await enterClean({ refine: rl.refine, crop: rl.crop, roomHeight: rl.room_height });
 }
 
 function refreshChosen() {
   const s = S.datasets.splats.find((x) => x.id === S.splatId);
-  const roomName = S.customMode ? "custom box"
+  const roomName = S.roomId === "__auto__" ? "auto room" : S.customMode ? "custom box"
     : (S.datasets.rooms.find((x) => x.id === S.roomId)?.name ?? null);
   el.chosen.innerHTML = s || roomName
     ? `<b>${s ? s.project : "—"}</b> → <b>${roomName ?? "—"}</b>`
     : "Pick a splat and a room.";
   el.goAlign.disabled = !(S.splatId && S.roomId);
-  el.goAlign.textContent = S.customMode ? "Continue to Draw →" : "Continue to Align →";
+  el.goAlign.textContent = S.roomId === "__auto__" ? "Detect room → Clean"
+    : S.customMode ? "Continue to Draw →" : "Continue to Align →";
 }
 
 // ---------------------------------------------------------------- stage 2
@@ -313,7 +329,21 @@ async function loadSplatIntoAlignPane() {
   return mesh;
 }
 
+/** Auto room: detect the box server-side, then open Clean exactly as a reopened custom box. */
+async function enterAuto() {
+  el.goAlign.disabled = true;
+  status(`<span class="spin">◐</span> detecting the room from the splat… (first time per scan ≈ 1 min)`);
+  try {
+    const rl = await api.autoRoom(S.splatId);
+    toast(`Detected a ${rl.auto.n_corners}-corner room — tweak in Clean, then Export`);
+    await reopenExport(rl);
+  } finally {
+    el.goAlign.disabled = false;
+  }
+}
+
 async function enterAlign() {
+  if (S.roomId === "__auto__") return enterAuto();
   if (S.customMode) return enterDraw();
   setStage("align");
   setAlignMode(false);

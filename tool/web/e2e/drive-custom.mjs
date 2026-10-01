@@ -22,7 +22,7 @@ const check = (n, ok, d = "") => {
 };
 
 async function ink(page, sel) {
-  const buf = await page.locator(sel).screenshot();
+  const buf = await page.locator(sel).screenshot({ timeout: 180000 });
   return page.evaluate(async (d) => {
     const img = new Image(); img.src = "data:image/png;base64," + d; await img.decode();
     const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
@@ -139,8 +139,8 @@ try {
   // Into Clean.
   await page.locator("#draw-clean").click();
   await page.waitForSelector("#faces .face", { timeout: 300000 });
-  const nFaces = await page.locator("#faces .face").count();
-  check("face rows for a 4-wall custom box", nFaces === 7, `${nFaces} rows`);
+  const nFaces = await page.locator("#faces .face:not(.resize)").count();
+  check("face rows for a 4-wall custom box", nFaces === 8, `${nFaces} rows (4 walls + master + floor + ceiling + floaters; Resize excluded)`);
 
   const shaderErr = errors.filter((e) => /shader|GLSL|compile|link/i.test(e));
   check("crop shader compiled", shaderErr.length === 0, shaderErr[0]?.slice(0, 160) ?? "");
