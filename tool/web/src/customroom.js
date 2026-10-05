@@ -170,6 +170,81 @@ export function polygonSelfIntersects(pts) {
   return false;
 }
 
+// ---- footprint edits in the Clean stage
+//
+// Each returns the new footprint and `wallSrc`: for every new wall, the old wall whose
+// offset/feather it inherits, so per-wall crop settings follow their walls through the edit.
+// Wall i runs from corner i to corner i+1.
+
+/** Split wall i at its midpoint: the new corner lands at index i+1; both halves keep wall i's settings. */
+export function insertCorner(footprint, i) {
+  const n = footprint.length;
+  const [a, b] = [footprint[i], footprint[(i + 1) % n]];
+  const fp = [...footprint.slice(0, i + 1), [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], ...footprint.slice(i + 1)];
+  const wallSrc = fp.map((_, j) => (j <= i ? j : j - 1));
+  return { footprint: fp, wallSrc };
+}
+
+/** Drop corner i: its two walls merge into one, which keeps the earlier wall's settings. */
+export function deleteCorner(footprint, i) {
+  const n = footprint.length;
+  if (n <= 3) throw new Error("A room needs at least 3 corners.");
+  const keep = footprint.map((_, k) => k).filter((k) => k !== i);
+  // a new wall starts at old corner keep[j], so it continues old wall keep[j] (the merged wall
+  // starts at the corner before i, whose old wall ran into i -- also right)
+  return { footprint: keep.map((k) => footprint[k]), wallSrc: keep };
+}
+
+/**
+ * Turn the room upside down in room space: (x, y, z) -> (x, -y, H - z), a 180 deg turn about the
+ * room's x axis that maps the box [0, H] onto itself. The crop region is unchanged -- the same
+ * splats are kept -- only which face is floor and which is ceiling swaps.
+ *
+ * Footprint: mirrored in y (floor plane seen from the other side) and re-ordered so it stays
+ * counter-clockwise with corner 0 first; new wall j is old wall n-1-j run backwards.
+ */
+export function flipFootprint(footprint) {
+  const n = footprint.length;
+  const fp = footprint.map((_, j) => {
+    const [x, y] = footprint[(n - j) % n];
+    return [x, -y];
+  });
+  return { footprint: fp, wallSrc: fp.map((_, j) => n - 1 - j) };
+}
+
+/** The scan -> room matrix (row-major 4x4) after the flip: rows e2/up negate, z' = H - z. */
+export function flipMatrix(m, height) {
+  const o = [...m];
+  for (let c = 0; c < 4; c++) { o[4 + c] = -m[4 + c]; o[8 + c] = -m[8 + c]; }
+  o[11] = height - m[11];
+  return o;
+}
+
+/**
+ * The custom-box basis after the flip, at the current height H. up and e2 reverse (still
+ * right-handed), and the box is re-anchored on its NEW floor -- the plane that was the ceiling --
+ * so Room height afterwards clips the ceiling like any upright box instead of moving the model.
+ * customMatrixForHeight(flipBasis(b, H), h) === flipMatrix(customMatrixForHeight(b, H), H) for
+ * every h.
+ */
+export function flipBasis(b, height) {
+  if (!b) return b;
+  // the old ceiling plane sits at up.(p - center) = H for a floor-anchored box, at 0 otherwise
+  const center = b.fromCeiling ? b.center.clone() : b.center.clone().addScaledVector(b.up, height);
+  return { ...b, e2: b.e2.clone().negate(), up: b.up.clone().negate(), center, fromCeiling: false };
+}
+
+/**
+ * The manual nudge after the flip. Refine rotates about the room centre (0, 0, H/2), which the
+ * flip leaves in place, so the flipped nudge is the old one conjugated by diag(1, -1, -1):
+ * rotation about x unchanged, about y and z reversed; the y/z shift reversed.
+ */
+export function flipRefine(r) {
+  const [rx, ry, rz] = r.rotation_euler_xyz;
+  const [tx, ty, tz] = r.translation;
+  return { ...r, rotation_euler_xyz: [rx, -ry, -rz], translation: [tx, -ty, -tz] };
+}
+
 /** Client-side twin of ifc_room.room_from_footprint, so the Clean stage treats it like any room. */
 export function makeRoomFromFootprint(footprint, height, name = "custom box") {
   const walls = footprint.map(([x1, y1], i) => {

@@ -27,10 +27,15 @@ import crop  # noqa: E402
 import ifc_room  # noqa: E402
 import ply  # noqa: E402
 import sdf  # noqa: E402
+import vault  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
+# Vault credentials live in the gitignored repo-root .env; see vault.py.
+vault.load_env(ROOT / ".env")
 SPLAT_ROOT = Path(os.environ.get(
-    "SPLAT_ROOT", "/Volumes/SMART_vault/06_Research_projects/Splats"))
+    "SPLAT_ROOT",
+    vault.mount_point() / "06_Research_projects/Splats" if vault.configured()
+    else "/Volumes/SMART_vault/06_Research_projects/Splats"))
 IFC_ROOT = Path(os.environ.get("IFC_ROOT", ROOT / "IFC"))
 # Cleaned outputs are large (200+ MB PLYs), so they go on the vault next to the source scans,
 # not on the laptop. Override with OUT_ROOT. Falls back to a local dir only if the vault is
@@ -44,9 +49,19 @@ def resolve_out_root() -> Path:
     """Where to write this export. Prefer the vault; fall back locally if it isn't mounted."""
     # The default OUT_ROOT lives under the vault, which can't be written if the share is gone.
     on_vault = str(OUT_ROOT).startswith(str(SPLAT_ROOT))
-    if on_vault and not SPLAT_ROOT.exists():
+    if on_vault and not splat_root_ok():
         return LOCAL_OUT_FALLBACK
     return OUT_ROOT
+
+
+def splat_root_ok() -> bool:
+    """SPLAT_ROOT is reachable, re-mounting the vault first if the share dropped."""
+    vault.ensure_mounted()
+    return SPLAT_ROOT.exists()
+
+
+vault.ensure_mounted(force=True)
+vault.start_watchdog()
 
 app = FastAPI(title="Splat/IFC Aligner")
 app.add_middleware(
@@ -63,7 +78,7 @@ _meshes: dict[str, dict] = {}
 def find_splats() -> dict[str, dict]:
     """Scan for `*/result/3D/model-gs-{ply,sog}` scan folders."""
     out: dict[str, dict] = {}
-    if not SPLAT_ROOT.exists():
+    if not splat_root_ok():
         return out
     for sog in sorted(SPLAT_ROOT.glob("*/*/result/3D/model-gs-sog/gs.sog")):
         scan = sog.parents[3]           # .../<Project>/<Scan-date>
@@ -151,6 +166,7 @@ def datasets():
     out = resolve_out_root()
     return {"splats": splats, "rooms": rooms,
             "splat_root": str(SPLAT_ROOT), "splat_root_exists": SPLAT_ROOT.exists(),
+            "vault_error": vault.last_error,
             "out_root": str(out), "out_on_vault": str(out).startswith(str(SPLAT_ROOT))}
 
 
@@ -518,6 +534,14 @@ def auto_room_box(splat_id: str, force: bool = False):
 def exports():
     """Previously exported cleans, newest first, each with a `reload` payload for the Clean stage."""
     return {"exports": find_exports(), "out_root": str(resolve_out_root())}
+
+
+@app.get("/api/vault")
+def vault_status():
+    """Cheap mount check (no scan walk) — the frontend polls this while the share is down."""
+    ok = splat_root_ok()
+    return {"splat_root": str(SPLAT_ROOT), "splat_root_exists": ok,
+            "configured": vault.configured(), "error": None if ok else vault.last_error}
 
 
 @app.get("/api/health")

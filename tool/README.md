@@ -82,6 +82,17 @@ to reshape the box — the crop re-bakes live — and use **Refine** to nudge th
 authors the box and sends it verbatim to the server for export, so the exported crop is exactly the
 preview.
 
+For a drawn or ⚡ auto box, each corner in the **Point pairs** list has **+** (add a corner halfway
+to the next one — it comes up selected, ready to drag) and **×** (remove it; refused if the walls
+would cross, and a box keeps at least 3 corners). Per-wall offset/feather follow their walls: both
+halves of a split wall keep its settings.
+
+**⇅ Flip upside down** (custom/auto boxes) is for scans that come out upside down. It turns the
+splat **and** its box over together — footprint, per-wall settings, floor ↔ ceiling settings and
+any Refine nudge — so the crop keeps exactly the same splats; only which way is up changes. The box
+is then anchored on its new floor, so **Room height** clips the ceiling as usual. Flipping twice
+restores the original exactly.
+
 Markers/corners draw on top of the splat by default (so they're easy to find). Gaussian splats don't
 write a depth buffer, so to make a corner *hide when it goes behind the splat* there's an **Occlude**
 toggle (Draw panel and Clean toggles): it switches the splat to depth-writing rendering — points get
@@ -143,9 +154,13 @@ How the room is found (`server/auto_room.py`):
    horizontal-disc slabs, i.e. real floor/ceiling surfaces). Tight wins on a side only when what it
    trims is negligible -- so floater haze above the ceiling and the mirrored room under a glossy
    floor are cut, but a mezzanine or a desk never masquerades as the floor.
-3. **Footprint.** Top-down maps of all structure and of the ceiling layer; dense cells are closed,
-   hole-filled (furniture is part of the room), merged and outlined, then simplified (Visvalingam)
-   and snapped to the wall axes -- typically 4–12 corners.
+3. **Footprint.** Seeded from where the scan saw **floor or ceiling** (flat discs at those
+   heights): only the room's interior has them, so floater haze around the room and whatever was
+   visible through windows and doors stay out. The seed is closed, grown a few cells out to the
+   walls (never through one) and outlined, then simplified (Visvalingam) and snapped to the wall
+   axes. A scan with almost no floor/ceiling (<1 % of its splats) falls back to "all dense
+   structure", which never cuts the room but keeps the haze. Against the 5 hand-drawn boxes the
+   mean footprint IoU is 0.85 (0.80 with density alone; CCS_AD 0.43 → 0.67).
 4. **Floater filter.** Splats larger than 1 % of the room (≈0.1–0.4 % of splats -- the bright
    needles and blobs) are dropped. It's the **Floaters** row in Clean (max size / min opacity,
    0 = off) and, like the crop, is the same formula in the preview shader and the export.

@@ -9,12 +9,13 @@
  */
 
 import { chromium } from "playwright";
+import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 
 const ROOM = process.argv[2] ?? "libra_lab";
 const SPLAT_IDX = Number(process.argv[3] ?? 0);
 const BASE = "http://127.0.0.1:5180";
-const SHOTS = new URL("./shots/", import.meta.url).pathname;
+const SHOTS = fileURLToPath(new URL("./shots/", import.meta.url));
 mkdirSync(SHOTS, { recursive: true });
 
 const log = (...a) => console.log("  ", ...a);

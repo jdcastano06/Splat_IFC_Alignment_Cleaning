@@ -328,6 +328,10 @@ input.num:focus { outline: none; border-color: var(--accent); }
 .cpair .res { font-size: 11px; }
 .cpair .res.bad { color: var(--warn); }
 .cpair .res.good { color: var(--ok); }
+.cpair:has(.cacts) { grid-template-columns: 20px 1fr auto auto; }
+.cpair .cacts { display: flex; gap: 2px; }
+.cpair .cacts button { min-width: 22px; padding: 1px 6px; line-height: 1.2; }
+.flip-room { align-self: flex-start; margin: 2px 0 6px; }
 
 .export-box {
   margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line);

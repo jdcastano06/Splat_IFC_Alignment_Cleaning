@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 tool/web/dist/
 tool/web/e2e/shots/
+.env

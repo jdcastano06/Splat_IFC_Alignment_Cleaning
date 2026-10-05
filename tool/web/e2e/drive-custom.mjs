@@ -9,11 +9,12 @@
  *   node e2e/drive-custom.mjs [splatIndex]
  */
 import { chromium } from "playwright";
+import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 
 const SPLAT_IDX = Number(process.argv[2] ?? 4);
 const BASE = "http://127.0.0.1:5180";
-const SHOTS = new URL("./shots/", import.meta.url).pathname;
+const SHOTS = fileURLToPath(new URL("./shots/", import.meta.url));
 mkdirSync(SHOTS, { recursive: true });
 let failed = false;
 const check = (n, ok, d = "") => {

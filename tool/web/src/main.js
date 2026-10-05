@@ -16,7 +16,10 @@ import { RoomModel } from "./room.js";
 import { FacePanel } from "./faces.js";
 import { RefinePanel, PointEditor, IDENTITY_REFINE } from "./refine.js";
 import { CropModifier, parseSdfBin } from "./crop-dyno.js";
-import { buildCustomRoom, makeRoomFromFootprint, polygonSelfIntersects, customMatrixForHeight } from "./customroom.js";
+import {
+  buildCustomRoom, makeRoomFromFootprint, polygonSelfIntersects, customMatrixForHeight,
+  insertCorner, deleteCorner, flipFootprint, flipMatrix, flipBasis, flipRefine,
+} from "./customroom.js";
 import { TwinPanel, loadTwinStyle } from "./twin.js";
 
 // Rooms whose Align pane lets you click the *real* tessellated IFC solids (walls with thickness),
@@ -41,6 +44,7 @@ const el = {
   export: $("#export"), exportOut: $("#export-out"), wantSog: $("#want-sog"), saveNote: $("#save-note"),
   cleanHint: $("#clean-hint"), cleanHintShort: $("#clean-hint-short"),
   refine: $("#refine"), refineReset: $("#refine-reset"), refineState: $("#refine-state"),
+  flipRoom: $("#flip-room"),
   showPoints: $("#show-points"), cleanPairs: $("#clean-pairs"),
   cleanSolveOut: $("#clean-solve-out"), pointsState: $("#points-state"),
   sectPoints: $("#sect-points"),
@@ -114,23 +118,39 @@ function matrix4FromRowMajor(m) {
 
 // ---------------------------------------------------------------- stage 1
 
-async function boot() {
+// The backend re-mounts the vault on its own (see server/vault.py); poll the cheap mount check
+// until it's back, then re-fetch the scan list instead of leaving the picker empty.
+async function waitForVault() {
+  for (let attempt = 1; ; attempt++) {
+    status(`<span style="color:var(--warn)">Vault not mounted — reconnecting… (attempt ${attempt})</span>`);
+    let v = null;
+    try {
+      v = await api.vault();
+    } catch { /* backend restarting; keep polling */ }
+    if (v?.splat_root_exists) break;
+    if (attempt === 1) {
+      toast(`Splat volume not mounted: ${S.datasets.splat_root}${v?.error ? ` (${v.error})` : ""} — retrying`, true);
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  status("Vault mounted — loading scans…");
   try {
     S.datasets = await api.datasets();
   } catch (e) {
-    status(`<span style="color:var(--warn)">API unreachable</span>`);
-    return toast(`Cannot reach the backend: ${e.message}. Is uvicorn running on :8777?`, true);
+    return toast(`Vault is back but the scan list failed: ${e.message}`, true);
   }
-  const d = S.datasets;
-  if (!d.splat_root_exists) {
-    toast(`Splat volume not mounted: ${d.splat_root}`, true);
-  }
+  renderSplats(S.datasets);
+  toast("Vault reconnected");
+  loadExports();
+}
+
+function renderSplats(d) {
   status(`${d.splats.length} scans · ${d.rooms.length} rooms`);
   if (el.saveNote) {
     el.saveNote.innerHTML = `Saves PLY + SOG + IFC to <b>${d.out_root}</b>`
       + (d.out_on_vault ? "" : ` <span style="color:var(--warn)">(vault not mounted — saving locally)</span>`);
   }
-
+  el.splatList.replaceChildren();
   for (const s of d.splats) {
     const b = document.createElement("button");
     b.className = "item";
@@ -147,6 +167,18 @@ async function boot() {
     });
     el.splatList.append(b);
   }
+}
+
+async function boot() {
+  try {
+    S.datasets = await api.datasets();
+  } catch (e) {
+    status(`<span style="color:var(--warn)">API unreachable</span>`);
+    return toast(`Cannot reach the backend: ${e.message}. Is uvicorn running on :8777?`, true);
+  }
+  const d = S.datasets;
+  renderSplats(d);
+  if (!d.splat_root_exists) waitForVault();
 
   // "No IFC" option, automatic: the room box is detected from the splat itself.
   const auto = document.createElement("button");
@@ -921,14 +953,10 @@ async function enterClean(restore = null) {
   S.crop.attach(mesh);
   v.scene.add(mesh);
 
-  // Every crop change drives both the shader (what's cut) and the wireframe box (what you see cut),
-  // so resizing -- per wall or via Scale/Width/Height -- redraws the polygon live.
-  const onCrop = (p) => {
-    S.crop.setParams(p);
-    S.meshes.cleanRoom?.setCropBoundary(p, S.roomHeight ?? S.room.height);
-  };
-  S.facePanel = new FacePanel(el.faces, S.room, onCrop, restore?.crop);
-  onCrop(S.facePanel.params);
+  S.facePanel = new FacePanel(el.faces, S.room, onCleanCrop, restore?.crop);
+  onCleanCrop(S.facePanel.params);
+  // Inserting/deleting corners and flipping only make sense for a box we authored.
+  el.flipRoom.hidden = !S.customMode;
 
   // ---- room height override (IFC extrusions are often not to scale)
   const h0 = restore?.roomHeight ?? S.room.height;
@@ -939,10 +967,7 @@ async function enterClean(restore = null) {
   // the transform all match what was exported. No-op when the height is the room's own.
   if (Math.abs(h0 - S.room.height) > 1e-9) applyRoomHeight(h0);
 
-  el.cleanHint.textContent =
-    `${S.room.footprint.length} walls · ${S.room.area.toFixed(1)} m² · h ${S.room.height.toFixed(2)} m. `
-    + `Offset trims the boundary (type past the slider for more); feather fades inside it.`;
-  el.cleanHintShort.textContent = `${S.room.footprint.length} walls`;
+  setCleanHint();
 
   // ---- twin preview: how the IFC will read over the splat in the frontend
   if (S.twinPanel) S.twinPanel.host.innerHTML = "";
@@ -1111,6 +1136,87 @@ function refreshPointEditor() {
   S.pointEditor.setVisible(el.showPoints.checked);
 }
 
+// Every crop change drives both the shader (what's cut) and the wireframe box (what you see cut),
+// so resizing -- per wall or via Scale/Width/Height -- redraws the polygon live.
+function onCleanCrop(p) {
+  S.crop?.setParams(p);
+  S.meshes.cleanRoom?.setCropBoundary(p, S.roomHeight ?? S.room.height);
+}
+
+/**
+ * Replace a custom box's footprint with one that has a different set of walls (corner added or
+ * removed, or the whole box flipped). Each new wall inherits the crop settings of `wallSrc[j]`,
+ * the face panel is rebuilt for the new wall count, and the SDF re-bakes.
+ */
+function applyFootprintEdit(footprint, wallSrc, { swapFloorCeil = false } = {}) {
+  const old = S.facePanel.params;
+  const seed = {
+    wall_offset: wallSrc.map((k) => old.wallOffset[k]),
+    wall_feather: wallSrc.map((k) => old.wallFeather[k]),
+    floor_offset: swapFloorCeil ? old.ceilOffset : old.floorOffset,
+    floor_feather: swapFloorCeil ? old.ceilFeather : old.floorFeather,
+    ceil_offset: swapFloorCeil ? old.floorOffset : old.ceilOffset,
+    ceil_feather: swapFloorCeil ? old.floorFeather : old.ceilFeather,
+    max_scale: old.maxScale, min_opacity: old.minOpacity,
+  };
+  S.room.footprint = footprint;
+  S.room = rebuildCustomRoomShape();
+  S.facePanel = new FacePanel(el.faces, S.room, onCleanCrop, seed);
+  // The live crop still holds the old SDF (old wall indices) until the re-bake lands, so only
+  // the wireframe follows now; scheduleCustomSdf hands the new params to the new crop.
+  S.meshes.cleanRoom?.setCropBoundary(S.facePanel.params, S.roomHeight);
+  scheduleCustomSdf();
+  setCleanHint();
+  refreshPointEditor();
+  renderCleanPairs();
+}
+
+function setCleanHint() {
+  el.cleanHint.textContent =
+    `${S.room.footprint.length} walls · ${S.room.area.toFixed(1)} m² · h ${S.room.height.toFixed(2)} m. `
+    + `Offset trims the boundary (type past the slider for more); feather fades inside it.`;
+  el.cleanHintShort.textContent = `${S.room.footprint.length} walls`;
+}
+
+/** Add a corner halfway along wall i (between corner i and the next one). */
+function addCornerAfter(i) {
+  const { footprint, wallSrc } = insertCorner(S.room.footprint, i);
+  applyFootprintEdit(footprint, wallSrc);
+  el.showPoints.checked = true;
+  S.pointEditor.setVisible(true);
+  S.pointEditor.select(i + 1);                 // straight onto the new corner, ready to drag
+  renderCleanPairs();
+  toast(`Corner added between ${pairLabel(i)} and ${pairLabel((i + 1) % (footprint.length - 1))} — drag it into place`);
+}
+
+function removeCorner(i) {
+  if (S.room.footprint.length <= 3) return toast("A room needs at least 3 corners.", true);
+  const { footprint, wallSrc } = deleteCorner(S.room.footprint, i);
+  if (polygonSelfIntersects(footprint)) {
+    return toast(`Removing ${pairLabel(i)} would make the walls cross — move it first.`, true);
+  }
+  applyFootprintEdit(footprint, wallSrc);
+  toast(`Corner ${pairLabel(i)} removed`);
+}
+
+/**
+ * Turn an upside-down scan the right way up, together with its box. The splat, the footprint,
+ * the per-wall crop, floor/ceiling settings and any nudge all flip as one, so the same splats stay
+ * inside the crop -- only which side is up changes. Flipping twice restores the original exactly.
+ */
+function flipRoomUpsideDown() {
+  if (!S.customMode) return;
+  const H = S.roomHeight ?? S.room.height;
+  S.customMatrix = flipMatrix(S.customMatrix, H);
+  S.customBasis = flipBasis(S.customBasis, H);
+  S.refine = flipRefine(S.refine);
+  S.refinePanel?.set(S.refine);
+  const { footprint, wallSrc } = flipFootprint(S.room.footprint);
+  applyFootprintEdit(footprint, wallSrc, { swapFloorCeil: true });
+  runResolve();                                 // re-applies the flipped transform to the splat
+  toast("Flipped upside down — box flipped with it");
+}
+
 /** Rebuild walls/area from an edited footprint and redraw the wireframe box. */
 function rebuildCustomRoomShape() {
   const room = makeRoomFromFootprint(S.room.footprint, S.roomHeight, S.room.name);
@@ -1208,6 +1314,22 @@ function renderCleanPairs() {
       <div class="idx" style="background:${hex(row.color)}">${row.label}</div>
       <div class="co">${row.text}</div>
       <div class="res ${row.bad ? "bad" : "good"}">${row.res != null ? row.res.toFixed(3) + " m" : ""}</div>`;
+    if (S.customMode) {
+      const n = rows.length;
+      const acts = document.createElement("div");
+      acts.className = "cacts";
+      acts.innerHTML = `
+        <button class="ghost tiny" data-act="add" title="Add a corner halfway to ${pairLabel((i + 1) % n)}">+</button>
+        <button class="ghost tiny" data-act="del" title="Remove this corner" ${n <= 3 ? "disabled" : ""}>×</button>`;
+      acts.addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (!b) return;
+        e.stopPropagation();                    // don't also select the row
+        if (b.dataset.act === "add") addCornerAfter(i);
+        else removeCorner(i);
+      });
+      d.append(acts);
+    }
     d.addEventListener("click", () => {
       el.showPoints.checked = true;
       S.pointEditor.setVisible(true);
@@ -1306,6 +1428,7 @@ el.showPoints.addEventListener("change", () => {
   renderCleanPairs();
 });
 el.refineReset.addEventListener("click", () => S.refinePanel?.reset());
+el.flipRoom.addEventListener("click", () => flipRoomUpsideDown());
 el.splatPoints.addEventListener("change", () => applySplatPoints(el.splatPoints.checked));
 
 // Draw-a-box controls
@@ -1415,6 +1538,19 @@ window.__e2eDrawMove = (i, xyz) => {
   S.drawPointEditor.onMoved(i, xyz);
 };
 window.__e2eCropParams = () => S.crop?.toExportCrop();
+// Corner add/remove + flip: the custom box's state, and a way to set one wall's crop like a slider.
+window.__e2eCustom = () => ({
+  footprint: S.room?.footprint, matrix: S.customMatrix, refine: S.refine,
+  fromCeiling: S.customBasis?.fromCeiling ?? null, height: S.roomHeight,
+  panelWalls: S.facePanel?.n, wallOffset: Array.from(S.facePanel?.params.wallOffset ?? []),
+  floorOffset: S.facePanel?.params.floorOffset, ceilOffset: S.facePanel?.params.ceilOffset,
+});
+window.__e2eSetFace = (key, i, v) => {
+  const p = S.facePanel.params;
+  if (i == null) p[key] = v; else p[key][i] = v;
+  S.facePanel.onChange(p);
+};
+window.__e2eSetRefine = (r) => { S.refine = r; S.refinePanel?.set(r); return runResolve(); };
 window.__e2eMarkerCount = (which) => S.views[which]?.markers.children.length ?? -1;
 window.__e2eGizmo = () => {
   const p = S.pointEditor;

@@ -5,11 +5,12 @@
  *   node e2e/drive-auto.mjs [scan-text]      (default "Space 1-20260701"; matched against the scan list)
  */
 import { chromium } from "playwright";
+import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 
 const SCAN = process.argv[2] ?? "Space 1-20260701";
 const BASE = "http://127.0.0.1:5180";
-const SHOTS = new URL("./shots/", import.meta.url).pathname;
+const SHOTS = fileURLToPath(new URL("./shots/", import.meta.url));
 const tag = SCAN.replace(/[^A-Za-z0-9]+/g, "_");
 mkdirSync(SHOTS, { recursive: true });
 let failed = false;

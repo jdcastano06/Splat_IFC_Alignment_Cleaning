@@ -6,10 +6,12 @@ downstream (crop, feather, cleaned.ply/.sog, cleaned.ifc, reopen) is then the ex
 
   1. Level: floor/ceiling disc normals -> up (auto_align.level). Floor & ceiling: the outer edges
      of the lowest / highest dense height bins (see vertical_extent).
-  2. Top-down maps on a grid ~1/250 of the scan extent: all structure between floor and ceiling,
-     and the ceiling layer alone (it spans the whole room with no furniture shadows).
-  3. Room = dense structure or ceiling coverage, closed and hole-filled (furniture inside is part
-     of the room), largest component, thin spurs (window/doorway leaks) shaved off.
+  2. Top-down maps on a grid ~1/250 of the scan extent: flat floor/ceiling discs, wall discs,
+     and all structure between floor and ceiling.
+  3. Room = where the scan saw floor or ceiling (only the room's interior has those -- floater
+     haze and whatever is visible through windows doesn't), closed, grown a short way out to the
+     walls. Falls back to "all dense structure" (`density_mask`) when floor/ceiling coverage is
+     too thin to trust.
   4. Outline -> Douglas-Peucker polygon (a handful of corners, like a hand-drawn box).
 """
 
@@ -203,24 +205,24 @@ def prepare(src, props, seed: int = 0, n_sample: int = 600_000) -> dict:
     xyz = f["xyz"] @ R.T
     w = f["w"]
     nz = np.abs(f["n"] @ R[2])
-    z0, z1 = vertical_extent(xyz[:, 2], w, horiz=(nz > 0.9) & (f["flat"] < 0.3))
-    return {"xyz": xyz, "w": w, "R": R, "z0": z0, "z1": z1, **info}
+    disc = f["flat"] < 0.3
+    hz, vt = disc & (nz > 0.9), disc & (nz < 0.2)                # flat floor/ceiling vs wall discs
+    z0, z1 = vertical_extent(xyz[:, 2], w, horiz=hz)
+    return {"xyz": xyz, "w": w, "R": R, "z0": z0, "z1": z1, "hz": hz, "vt": vt, **info}
 
+
+VERSION = "fc1"  # bump when detection changes, so auto_clean's cached boxes are recomputed
 
 # Footprint-mask knobs (tuned on the vault's 22 scans; see tests/bench_auto_room.py).
-MASK = dict(q_struct=15, q_ceil=15, close_r=6, open_r=2, keep_frac=0.15, min_area=0.01)
+# Floor/ceiling mask: mean IoU vs the 5 hand-drawn boxes 0.80 -> 0.85, and it stops swallowing
+# the haze around corridor-like scans (CCS_AD 0.43 -> 0.67).
+MASK = dict(q_struct=15, q_ceil=15, close_r=6, open_r=2, keep_frac=0.15, min_area=0.01,
+            seed_sigma=5.0, seed_frac=0.04, seed_close=10, wall_frac=0.15, grow=6,
+            min_floor_ceil=0.01)
 
 
-def room_mask(P: dict, grid_n: int = 250, q_struct=None, q_ceil=None, close_r=None,
-              open_r=None, keep_frac=None, **_):
-    """Top-down room mask -> (mask, lo, cell, maps). Fast; re-run freely with other knobs."""
-    q_struct = MASK["q_struct"] if q_struct is None else q_struct
-    q_ceil = MASK["q_ceil"] if q_ceil is None else q_ceil
-    close_r = MASK["close_r"] if close_r is None else close_r
-    open_r = MASK["open_r"] if open_r is None else open_r
-    keep_frac = MASK["keep_frac"] if keep_frac is None else keep_frac
-    xyz, w, z0, z1 = P["xyz"], P["w"], P["z0"], P["z1"]
-    H = z1 - z0
+def _grid(P: dict, grid_n: int):
+    xyz, z0, z1 = P["xyz"], P["z0"], P["z1"]
     inside_z = (xyz[:, 2] >= z0) & (xyz[:, 2] <= z1)
     lo = np.percentile(xyz[inside_z, :2], 0.5, axis=0)
     hi = np.percentile(xyz[inside_z, :2], 99.5, axis=0)
@@ -232,8 +234,68 @@ def room_mask(P: dict, grid_n: int = 250, q_struct=None, q_ceil=None, close_r=No
         ij = np.floor((xyz[m, :2] - lo) / cell).astype(int)
         ok = (ij >= 0).all(1) & (ij[:, 0] < shape[1]) & (ij[:, 1] < shape[0])
         img = np.zeros(shape)
-        np.add.at(img, (ij[ok, 1], ij[ok, 0]), w[m][ok])
+        np.add.at(img, (ij[ok, 1], ij[ok, 0]), P["w"][m][ok])
         return img
+    return lo, cell, raster, inside_z
+
+
+def room_mask(P: dict, grid_n: int = 250, **kw):
+    """Top-down room mask -> (mask, lo, cell, maps), from floor/ceiling coverage grown to the walls;
+    the density mask when the scan has too little floor/ceiling to go on. Re-run freely."""
+    k = {**MASK, **{a: b for a, b in kw.items() if b is not None}}
+    dense, lo, cell, maps = density_mask(P, grid_n=grid_n, **kw)
+    if "hz" not in P:                                   # prepared before the floor/ceiling cues
+        return dense, lo, cell, maps
+    _, _, raster, inside_z = _grid(P, grid_n)
+    zr = (P["xyz"][:, 2] - P["z0"]) / (P["z1"] - P["z0"])
+    floor_ceil = P["hz"] & (((zr > -0.03) & (zr < 0.10)) | ((zr > 0.85) & (zr < 1.03)))
+    # every usable scan has 2.6-6.4% of its in-room splats on floor/ceiling; a degenerate one
+    # (Space_12, 0.3%) has too little to outline a room with, so keep the density mask
+    if floor_ceil.sum() < k["min_floor_ceil"] * max(inside_z.sum(), 1):
+        return dense, lo, cell, maps
+    ev = ndi.gaussian_filter(raster(floor_ceil), k["seed_sigma"])
+    wall = ndi.gaussian_filter(raster(P["vt"] & (zr > 0.1) & (zr < 0.9)), 0.7)
+
+    def rel(img, frac):                                 # robust: fraction of the 98th percentile
+        nz = img[img > 1e-9]
+        return img > frac * (np.percentile(nz, 98) if len(nz) else np.inf)
+
+    # seed: wherever floor or ceiling was seen (sparse ceilings still count once blurred)
+    seed = ndi.binary_opening(rel(ev, k["seed_frac"]), _disk(1))
+    seed = ndi.binary_fill_holes(ndi.binary_closing(seed, _disk(k["seed_close"])))
+    lab, n = ndi.label(seed)
+    if n == 0:
+        return dense, lo, cell, maps
+    mass = ndi.sum(ev, lab, index=np.arange(1, n + 1))
+    seed = np.isin(lab, 1 + np.nonzero(mass >= k["keep_frac"] * mass.max())[0])
+    # grow a few cells out to the walls (floor near a wall is often hidden by furniture), never
+    # through one, then take the wall itself so the cut lands on it rather than inside
+    walls = rel(wall, k["wall_frac"])
+    grown = ndi.binary_dilation(seed, structure=ndi.generate_binary_structure(2, 1),
+                                iterations=k["grow"], mask=~walls | seed)
+    room = grown | (walls & ndi.binary_dilation(grown, iterations=2))
+    room = ndi.binary_fill_holes(ndi.binary_closing(room, _disk(3)))
+    room = ndi.binary_opening(room, _disk(2))
+    lab, n = ndi.label(room)
+    if n == 0:
+        return dense, lo, cell, maps
+    sizes = ndi.sum(np.ones_like(lab), lab, index=np.arange(1, n + 1))
+    room = lab == (int(np.argmax(sizes)) + 1)
+    return room, lo, cell, {**maps, "ceil": ev}
+
+
+def density_mask(P: dict, grid_n: int = 250, q_struct=None, q_ceil=None, close_r=None,
+                 open_r=None, keep_frac=None, **_):
+    """Room = all dense structure. Never cuts the room, but keeps haze and what's seen through
+    windows; the fallback for scans with little floor/ceiling."""
+    q_struct = MASK["q_struct"] if q_struct is None else q_struct
+    q_ceil = MASK["q_ceil"] if q_ceil is None else q_ceil
+    close_r = MASK["close_r"] if close_r is None else close_r
+    open_r = MASK["open_r"] if open_r is None else open_r
+    keep_frac = MASK["keep_frac"] if keep_frac is None else keep_frac
+    xyz, z0, z1 = P["xyz"], P["z0"], P["z1"]
+    H = z1 - z0
+    lo, cell, raster, inside_z = _grid(P, grid_n)
 
     # structure: everything between floor and ceiling; ceiling layer alone as a second cue
     struct_img = ndi.gaussian_filter(raster(inside_z), 1.0)

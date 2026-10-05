@@ -22,6 +22,7 @@ const post = (url, body) =>
 
 export const api = {
   datasets: () => j("/api/datasets"),
+  vault: () => j("/api/vault"),
   room: (id) => j(`/api/room/${encodeURIComponent(id)}`),
   roomMesh: (id) => j(`/api/room/${encodeURIComponent(id)}/mesh`),
   splatInfo: (id) => j(`/api/splat/${id}/info`),

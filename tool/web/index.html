@@ -122,6 +122,8 @@
           <label class="check inline"><input type="checkbox" id="show-points" /><span>Edit points</span></label>
           <label class="check inline" title="Hide points/handles that go behind the splat (splat gets grainier)"><input type="checkbox" id="clean-occlude" /><span>Occlude</span></label>
         </div>
+        <button class="ghost tiny flip-room" id="flip-room" hidden
+          title="Scan came out upside down? Flips the splat and its box together, so the crop still matches">⇅ Flip upside down</button>
 
         <details class="sect" id="sect-refine">
           <summary>
@@ -144,6 +146,8 @@
             <p class="hint">
               Tick <b>Edit points</b>, click a lettered point, then drag it onto the splat feature
               it belongs to. Releasing re-solves the alignment.
+              For a drawn or auto box: <b>+</b> adds a corner halfway to the next one, <b>×</b>
+              removes one.
             </p>
             <div class="clean-pairs" id="clean-pairs"></div>
             <div class="solve-out" id="clean-solve-out"></div>

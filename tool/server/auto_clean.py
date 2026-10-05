@@ -98,7 +98,8 @@ def preview_png(dbg, res, path, title: str = ""):
 def _cache_path(sid: str, s_info: dict):
     src = s_info["ply"] or s_info["sog"]
     st = os.stat(src)
-    return app.CACHE_ROOT / "auto_room" / f"{sid.replace('/', '__')}_{st.st_size}_{int(st.st_mtime)}.json"
+    return (app.CACHE_ROOT / "auto_room"
+            / f"{sid.replace('/', '__')}_{st.st_size}_{int(st.st_mtime)}_{auto_room.VERSION}.json")
 
 
 def detect(sid: str, s_info: dict, force: bool = False) -> tuple[dict, str, dict | None]:
