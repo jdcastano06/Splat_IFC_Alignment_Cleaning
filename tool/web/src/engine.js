@@ -1,60 +1,36 @@
 /**
- * App shell: three stages over one piece of state.
+ * The headless engine: three stages over one piece of state, no DOM except the three canvas hosts.
  *
  * Stage 2 uses two viewports side by side because before solving, the splat and the room live in
  * unrelated coordinate systems -- one merged scene would put a 3 m room somewhere inside a 90 m
  * cloud of floaters. After solving, stage 3 merges them: the splat carries the transform, so the
  * scene's world space *is* room space, which is exactly what the crop shader assumes.
+ *
+ * Everything the user sees goes through `store` (store.js); React renders it and calls the
+ * actions exported at the bottom. The 3D side (viewports, meshes, gizmos, crop) lives here in `S`.
  */
 
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { SplatMesh } from "@sparkjsdev/spark";
+import { SplatMesh, SplatFileType } from "@sparkjsdev/spark";
 import { api } from "./api.js";
+import { store } from "./store.js";
 import { Viewport, robustBox, buildSplatPoints } from "./viewer.js";
 import { RoomModel } from "./room.js";
-import { FacePanel } from "./faces.js";
-import { RefinePanel, PointEditor, IDENTITY_REFINE } from "./refine.js";
+import { FaceModel } from "./faces.js";
+import { PointEditor, IDENTITY_REFINE, isIdentityRefine } from "./refine.js";
 import { CropModifier, parseSdfBin } from "./crop-dyno.js";
 import {
   buildCustomRoom, makeRoomFromFootprint, polygonSelfIntersects, customMatrixForHeight,
   insertCorner, deleteCorner, flipFootprint, flipMatrix, flipBasis, flipRefine,
 } from "./customroom.js";
-import { TwinPanel, loadTwinStyle } from "./twin.js";
+import { loadTwinStyle, saveTwinStyle, TWIN_DEFAULTS, TWIN_FRONTEND_BG } from "./twin.js";
 
 // Rooms whose Align pane lets you click the *real* tessellated IFC solids (walls with thickness),
 // not just the generated footprint wireframe. smart_lab is a plain rectangle: the box gives only 8
 // corners, so aligning off features on the actual walls is far easier. The solids sit in the same
 // room frame as the footprint, so picks land in room space exactly like the box corners do.
 const ALIGN_ON_REAL_IFC = new Set(["smart_lab"]);
-
-const $ = (s) => document.querySelector(s);
-const el = {
-  status: $("#status"), toast: $("#toast"), stages: $("#stages"),
-  splatList: $("#splat-list"), roomList: $("#room-list"),
-  reopenCard: $("#reopen-card"), reopenList: $("#reopen-list"),
-  chosen: $("#chosen"), goAlign: $("#go-align"),
-  hostSplat: $("#host-splat"), hostRoom: $("#host-room"), hostClean: $("#host-clean"),
-  pairs: $("#pairs"), pairHint: $("#pair-hint"), solve: $("#solve"), solveOut: $("#solve-out"),
-  yawOnly: $("#yaw-only"), goClean: $("#go-clean"),
-  splatCount: $("#splat-count"), roomName: $("#room-name"), splatPoints: $("#splat-points"),
-  roomHeight: $("#room-height"), roomHeightNum: $("#room-height-num"),
-  faces: $("#faces"), cropOn: $("#crop-on"), showRoom: $("#show-room"), showIfc: $("#show-ifc"),
-  twinOn: $("#twin-on"), twin: $("#twin"), twinState: $("#twin-state"),
-  export: $("#export"), exportOut: $("#export-out"), wantSog: $("#want-sog"), saveNote: $("#save-note"),
-  cleanHint: $("#clean-hint"), cleanHintShort: $("#clean-hint-short"),
-  refine: $("#refine"), refineReset: $("#refine-reset"), refineState: $("#refine-state"),
-  flipRoom: $("#flip-room"),
-  showPoints: $("#show-points"), cleanPairs: $("#clean-pairs"),
-  cleanSolveOut: $("#clean-solve-out"), pointsState: $("#points-state"),
-  sectPoints: $("#sect-points"),
-  alignSide: $("#align-side"), drawSide: $("#draw-side"), stageAlign: $("#stage-align"),
-  roomPane: $("#room-pane"), splatPaneHint: $("#splat-pane-hint"),
-  drawPointsList: $("#draw-points"), drawHeight: $("#draw-height"),
-  drawHeightNum: $("#draw-height-num"), drawFlip: $("#draw-flip"),
-  drawOut: $("#draw-out"), drawClean: $("#draw-clean"), drawClose: $("#draw-close"),
-  drawOcclude: $("#draw-occlude"), cleanOcclude: $("#clean-occlude"),
-};
 
 const S = {
   datasets: null,
@@ -66,15 +42,15 @@ const S = {
   views: {},          // splat | room | clean
   meshes: {},
   crop: null,
-  facePanel: null,
+  facePanel: null,    // FaceModel (kept under the old name: the e2e hooks drive it)
   refine: IDENTITY_REFINE(),   // manual nudge composed on top of the solve
-  refinePanel: null,
   pointEditor: null,
   twinStyle: loadTwinStyle(),  // how the IFC/twin reads over the splat; persisted across sessions
-  twinPanel: null,
   alignGizmos: null,  // {splat, room} TransformControls for moving a pair's points in Align
   alignSel: null,     // pair index currently selected for dragging in Align (null = none)
 };
+
+const ui = () => store.get();
 
 // ---------------------------------------------------------------- helpers
 
@@ -82,7 +58,7 @@ const S = {
  * Pair identity: the same letter AND the same colour in both panes, so "A goes with A" is
  * readable at a glance and you can see which corners you have already done.
  */
-const PAIR_COLORS = [
+export const PAIR_COLORS = [
   0xff6b5e, 0x4da3ff, 0x4dd6a8, 0xffb454, 0xc57cff, 0x2ee6d6,
   0xff8ac4, 0xa3e635, 0x38bdf8, 0xfb923c, 0x818cf8, 0xf472b6,
 ];
@@ -91,29 +67,52 @@ const pairLabel = (i) =>
   (i < 26 ? String.fromCharCode(65 + i) : String.fromCharCode(65 + (i % 26)) + Math.floor(i / 26));
 const hex = (c) => "#" + c.toString(16).padStart(6, "0");
 
-let toastTimer;
+let toastId = 0;
 function toast(msg, isErr = false) {
-  el.toast.textContent = msg;
-  el.toast.className = `toast show${isErr ? " err" : ""}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.toast.className = "toast"), isErr ? 6000 : 3000);
+  store.set({ toast: { id: ++toastId, msg, err: isErr } });
 }
-const status = (m) => (el.status.innerHTML = m);
-const mb = (b) => `${(b / 1e6).toFixed(0)} MB`;
+function status(text, { busy = false, tone = "neutral" } = {}) {
+  store.set({ status: { text, busy, tone } });
+}
+const fail = (e) => toast(e.message, true);
 
-function setStage(name) {
+/** Resolves after React has committed and the browser has painted (two frames). */
+const nextPaint = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+/**
+ * Switch stage and wait for it to be on screen. Viewports are built on the stage's canvas hosts,
+ * and a host that is still display:none measures 0x0 -- Spark would initialise against that and
+ * draw nothing until the next camera change -- so callers construct views only after this resolves.
+ */
+async function setStage(name) {
   S.stage = name;
-  for (const s of document.querySelectorAll(".panel-stage")) {
-    s.classList.toggle("active", s.id === `stage-${name}`);
+  store.set({ stage: name });
+  await nextPaint();
+  // Only the visible panes render; the rest sit idle until their stage comes back.
+  const live = name === "align" ? ["splat", "room"] : name === "clean" ? ["clean"] : [];
+  for (const [key, v] of Object.entries(S.views)) {
+    if (!v) continue;
+    if (live.includes(key)) v.resume(); else v.pause();
   }
-  for (const b of el.stages.children) b.classList.toggle("active", b.dataset.stage === name);
-  // Viewports sized while hidden read 0x0; re-measure on reveal.
-  requestAnimationFrame(() => Object.values(S.views).forEach((v) => v?.resize()));
 }
 
 function matrix4FromRowMajor(m) {
   // THREE.Matrix4.set() takes row-major arguments, so this maps straight across.
   return new THREE.Matrix4().set(...m);
+}
+
+/** A viewport on one of the persistent canvas hosts React renders (#host-splat/room/clean). */
+function makeView(which, accent) {
+  const v = new Viewport(document.getElementById(`host-${which}`), { accent, navToggle: false });
+  v.onNavChange = (mode) => store.slice("nav", { [which]: mode });
+  return v;
+}
+
+function ensureAlignViews() {
+  if (!S.views.splat) {
+    S.views.splat = makeView("splat", 0xffb454);
+    S.views.room = makeView("room", 0x4dd6a8);
+  }
 }
 
 // ---------------------------------------------------------------- stage 1
@@ -122,7 +121,7 @@ function matrix4FromRowMajor(m) {
 // until it's back, then re-fetch the scan list instead of leaving the picker empty.
 async function waitForVault() {
   for (let attempt = 1; ; attempt++) {
-    status(`<span style="color:var(--warn)">Vault not mounted — reconnecting… (attempt ${attempt})</span>`);
+    status(`Vault not mounted — reconnecting… (attempt ${attempt})`, { busy: true, tone: "warn" });
     let v = null;
     try {
       v = await api.vault();
@@ -133,103 +132,50 @@ async function waitForVault() {
     }
     await new Promise((r) => setTimeout(r, 5000));
   }
-  status("Vault mounted — loading scans…");
+  status("Vault mounted — loading scans…", { busy: true });
   try {
     S.datasets = await api.datasets();
   } catch (e) {
     return toast(`Vault is back but the scan list failed: ${e.message}`, true);
   }
-  renderSplats(S.datasets);
+  publishDatasets(S.datasets);
   toast("Vault reconnected");
   loadExports();
 }
 
-function renderSplats(d) {
-  status(`${d.splats.length} scans · ${d.rooms.length} rooms`);
-  if (el.saveNote) {
-    el.saveNote.innerHTML = `Saves PLY + SOG + IFC to <b>${d.out_root}</b>`
-      + (d.out_on_vault ? "" : ` <span style="color:var(--warn)">(vault not mounted — saving locally)</span>`);
-  }
-  el.splatList.replaceChildren();
-  for (const s of d.splats) {
-    const b = document.createElement("button");
-    b.className = "item";
-    b.innerHTML = `<div class="n">${s.project}</div>
-      <div class="r">${mb(s.sog_bytes)} SOG</div>
-      <div class="m">${s.scan}</div>
-      <div class="r">${s.has_ply ? mb(s.ply_bytes) + " PLY" : "SOG only"}</div>`;
-    if (!s.has_ply) b.title = "No gs.ply — export decodes the SOG (first export takes a little longer)";
-    b.addEventListener("click", () => {
-      S.splatId = s.id;
-      for (const o of el.splatList.children) o.classList.remove("sel");
-      b.classList.add("sel");
-      refreshChosen();
-    });
-    el.splatList.append(b);
-  }
+function publishDatasets(d) {
+  status(`${d.splats.length} scans · ${d.rooms.length} rooms`, { tone: "ok" });
+  store.set({ datasets: d });
+  store.slice("clean", { saveNote: { dir: d.out_root, onVault: !!d.out_on_vault } });
 }
 
 async function boot() {
   try {
     S.datasets = await api.datasets();
   } catch (e) {
-    status(`<span style="color:var(--warn)">API unreachable</span>`);
+    status("API unreachable", { tone: "warn" });
     return toast(`Cannot reach the backend: ${e.message}. Is uvicorn running on :8777?`, true);
   }
-  const d = S.datasets;
-  renderSplats(d);
-  if (!d.splat_root_exists) waitForVault();
-
-  // "No IFC" option, automatic: the room box is detected from the splat itself.
-  const auto = document.createElement("button");
-  auto.className = "item auto-item";
-  auto.innerHTML = `<div class="n">⚡ Auto room</div>
-    <div class="r">no IFC</div>
-    <div class="m">detect walls, floor &amp; ceiling from the splat — straight to Clean</div>`;
-  auto.addEventListener("click", () => {
-    S.roomId = "__auto__";
-    S.customMode = true;
-    for (const o of el.roomList.children) o.classList.remove("sel");
-    auto.classList.add("sel");
-    refreshChosen();
-  });
-  el.roomList.append(auto);
-
-  // "No IFC" option: draw the box yourself on the splat.
-  const custom = document.createElement("button");
-  custom.className = "item custom-item";
-  custom.innerHTML = `<div class="n">✏️ Draw a custom box</div>
-    <div class="r">no IFC</div>
-    <div class="m">click the room's floor corners on the splat</div>`;
-  custom.addEventListener("click", () => {
-    S.roomId = "__custom__";
-    S.customMode = true;
-    for (const o of el.roomList.children) o.classList.remove("sel");
-    custom.classList.add("sel");
-    refreshChosen();
-  });
-  el.roomList.append(custom);
-
-  for (const r of d.rooms) {
-    const b = document.createElement("button");
-    b.className = "item" + (r.error ? " bad" : "");
-    b.innerHTML = `<div class="n">${r.name}</div>
-      <div class="r">${r.error ? "unreadable" : r.area_m2 + " m²"}</div>
-      <div class="m">${r.id}</div>
-      <div class="r">${r.error ? "" : `${r.points} pts · h ${r.height_m} m`}</div>`;
-    if (r.error) b.title = r.error;
-    b.addEventListener("click", () => {
-      if (r.error) return toast(r.error, true);
-      S.roomId = r.id;
-      S.customMode = false;
-      for (const o of el.roomList.children) o.classList.remove("sel");
-      b.classList.add("sel");
-      refreshChosen();
-    });
-    el.roomList.append(b);
-  }
+  publishDatasets(S.datasets);
+  if (!S.datasets.splat_root_exists) waitForVault();
   setStage("select");
   loadExports();
+}
+
+function selectSplat(id) {
+  S.splatId = id;
+  store.slice("sel", { splatId: id });
+}
+
+/** "__auto__" (detect the box), "__custom__" (draw it), or a real IFC room id. */
+function selectRoom(id) {
+  if (id !== "__auto__" && id !== "__custom__") {
+    const r = S.datasets?.rooms.find((x) => x.id === id);
+    if (r?.error) return toast(r.error, true);
+  }
+  S.roomId = id;
+  S.customMode = id === "__auto__" || id === "__custom__";
+  store.slice("sel", { roomId: id, customMode: S.customMode });
 }
 
 // ---- reopen a previous export ---------------------------------------------
@@ -251,34 +197,17 @@ const normRefine = (r) => r
 
 /** List previous exports (if any) as one-click entries that jump back into Clean. */
 async function loadExports() {
-  let data;
   try {
-    data = await api.exports();
-  } catch {
-    return; // no backend / no exports -> just don't show the panel
-  }
-  const list = data.exports ?? [];
-  if (!list.length) return;
-  el.reopenCard.hidden = false;
-  el.reopenList.innerHTML = "";
-  for (const e of list) {
-    const disabled = !e.reload?.reloadable || !e.splat_available;
-    const b = document.createElement("button");
-    b.className = "item" + (disabled ? " bad" : "");
-    const when = e.created ? new Date(e.created).toLocaleString() : "";
-    const pct = e.kept_fraction != null ? ` · ${(e.kept_fraction * 100).toFixed(0)}% kept` : "";
-    b.innerHTML = `<div class="n">${e.room_name}${e.custom_mode ? " ✏️" : ""}</div>
-      <div class="r">${e.label}</div>
-      <div class="m">${e.splat_id}</div>
-      <div class="r">${when}${pct}</div>`;
-    if (!e.splat_available) b.title = "Source scan not mounted — cannot reopen.";
-    else if (!e.reload?.reloadable) b.title = "Predates reopen support — re-export it once to enable.";
-    b.addEventListener("click", () => {
-      if (disabled) return toast(b.title, true);
-      reopenExport(e.reload).catch((err) => toast(err.message, true));
-    });
-    el.reopenList.append(b);
-  }
+    const data = await api.exports();
+    store.set({ exports: data.exports ?? [] });
+  } catch { /* no backend / no exports -> just don't show the list */ }
+}
+
+/** Reopen an entry from the exports list, explaining why when it can't be. */
+function reopen(e) {
+  if (!e.splat_available) return toast("Source scan not mounted — cannot reopen.", true);
+  if (!e.reload?.reloadable) return toast("Predates reopen support — re-export it once to enable.", true);
+  return reopenExport(e.reload).catch(fail);
 }
 
 /** Restore a previous export's state and drop straight into the Clean stage. */
@@ -302,10 +231,11 @@ async function reopenExport(rl) {
   } else {
     S.roomId = rl.room_id;
     S.pairs = (rl.pairs ?? []).map((p) => ({ splat: p.splat, room: p.room }));
-    el.yawOnly.checked = !!rl.yaw_only;
-    status(`<span class="spin">◐</span> loading room…`);
+    store.slice("align", { yawOnly: !!rl.yaw_only });
+    status("Loading room…", { busy: true });
     S.room = await api.room(S.roomId);
   }
+  store.slice("sel", { splatId: S.splatId, roomId: rl.auto ? "__auto__" : S.roomId, customMode: S.customMode });
   // The look this export was tuned at, so reopening shows the walls you exported, not the last
   // look you happened to leave the panel on.
   if (rl.twin) S.twinStyle = { ...S.twinStyle, ...rl.twin };
@@ -313,28 +243,11 @@ async function reopenExport(rl) {
   await enterClean({ refine: rl.refine, crop: rl.crop, roomHeight: rl.room_height });
 }
 
-function refreshChosen() {
-  const s = S.datasets.splats.find((x) => x.id === S.splatId);
-  const roomName = S.roomId === "__auto__" ? "auto room" : S.customMode ? "custom box"
-    : (S.datasets.rooms.find((x) => x.id === S.roomId)?.name ?? null);
-  el.chosen.innerHTML = s || roomName
-    ? `<b>${s ? s.project : "—"}</b> → <b>${roomName ?? "—"}</b>`
-    : "Pick a splat and a room.";
-  el.goAlign.disabled = !(S.splatId && S.roomId);
-  el.goAlign.textContent = S.roomId === "__auto__" ? "Detect room → Clean"
-    : S.customMode ? "Continue to Draw →" : "Continue to Align →";
-}
-
 // ---------------------------------------------------------------- stage 2
 
 /** Show either the point-pairs panel (IFC) or the draw-a-box panel (custom). */
 function setAlignMode(custom) {
-  el.stageAlign.classList.toggle("custom", custom);
-  el.alignSide.hidden = custom;
-  el.drawSide.hidden = !custom;
-  for (const b of el.stages.children) {
-    if (b.dataset.stage === "align") b.querySelector("b").nextSibling.textContent = custom ? " Draw" : " Align";
-  }
+  store.slice("align", { mode: custom ? "draw" : "pairs" });
 }
 
 /** Load the splat into the align/draw splat pane, honouring the Points toggle. Shared. */
@@ -344,7 +257,8 @@ async function loadSplatIntoAlignPane() {
     sv.scene.remove(S.meshes.splatAlign);
     S.meshes.splatAlign.dispose();
   }
-  const mesh = await loadSplat(api.splatSogUrl(S.splatId), sv);
+  store.slice("align", { splatCount: null });
+  const mesh = await loadSplat(api.splatSogUrl(S.splatId));
   S.meshes.splatAlign = mesh;
   sv.scene.add(mesh);
   sv.pickTargets = [mesh];
@@ -356,35 +270,37 @@ async function loadSplatIntoAlignPane() {
     S.meshes.splatPoints.material.dispose();
     S.meshes.splatPoints = null;
   }
-  if (el.splatPoints.checked) applySplatPoints(true);
-  el.splatCount.textContent = ` ${mesh.packedSplats.numSplats.toLocaleString()} splats`;
+  if (ui().align.splatPoints) applySplatPoints(true);
+  store.slice("align", { splatCount: mesh.packedSplats.numSplats });
   return mesh;
+}
+
+/** Continue from Select: Auto detects then opens Clean; custom draws; an IFC room aligns. */
+async function enterNext() {
+  store.set({ entering: true });
+  try {
+    await enterAlign();
+  } finally {
+    store.set({ entering: false });
+  }
 }
 
 /** Auto room: detect the box server-side, then open Clean exactly as a reopened custom box. */
 async function enterAuto() {
-  el.goAlign.disabled = true;
-  status(`<span class="spin">◐</span> detecting the room from the splat… (first time per scan ≈ 1 min)`);
-  try {
-    const rl = await api.autoRoom(S.splatId);
-    toast(`Detected a ${rl.auto.n_corners}-corner room — tweak in Clean, then Export`);
-    await reopenExport(rl);
-  } finally {
-    el.goAlign.disabled = false;
-  }
+  status("Detecting the room from the splat… (first time per scan ≈ 1 min)", { busy: true });
+  const rl = await api.autoRoom(S.splatId);
+  toast(`Detected a ${rl.auto.n_corners}-corner room — tweak in Clean, then Export`);
+  await reopenExport(rl);
 }
 
 async function enterAlign() {
   if (S.roomId === "__auto__") return enterAuto();
   if (S.customMode) return enterDraw();
-  setStage("align");
+  await setStage("align");
   setAlignMode(false);
+  ensureAlignViews();
   resetPairs();
 
-  if (!S.views.room) {
-    S.views.splat = new Viewport(el.hostSplat, { accent: 0xffb454 });
-    S.views.room = new Viewport(el.hostRoom, { accent: 0x4dd6a8 });
-  }
   // One translate-gizmo per pane, so a placed point can be nudged after the fact -- the same
   // move-after-clicking the custom Draw stage gives its corners, now for real IFC pairs too.
   // Created once and reused (the panes are), because TransformControls owns DOM listeners.
@@ -395,9 +311,9 @@ async function enterAlign() {
     };
   }
 
-  status(`<span class="spin">◐</span> loading room…`);
+  status("Loading room…", { busy: true });
   S.room = await api.room(S.roomId);
-  el.roomName.textContent = ` ${S.room.name} · ${S.room.footprint.length} walls`;
+  store.slice("align", { roomLabel: `${S.room.name} · ${S.room.footprint.length} walls` });
 
   // room pane
   const rv = S.views.room;
@@ -455,16 +371,16 @@ async function enterAlign() {
   }
 
   // splat pane
-  status(`<span class="spin">◐</span> loading splat…`);
+  status("Loading splat…", { busy: true });
   try {
     const mesh = await loadSplatIntoAlignPane();
     S.views.splat.onPick = (hit) => {
       if (gizmoBusy(S.alignGizmos?.splat)) return;
       addPoint("splat", hit.point, false);
     };
-    status(`${mesh.packedSplats.numSplats.toLocaleString()} splats · ${S.room.name}`);
+    status(`${mesh.packedSplats.numSplats.toLocaleString()} splats · ${S.room.name}`, { tone: "ok" });
   } catch (e) {
-    status(`<span style="color:var(--warn)">splat failed</span>`);
+    status("Splat failed to load", { tone: "warn" });
     toast(`Could not load the splat: ${e.message}`, true);
   }
 }
@@ -529,23 +445,21 @@ function applyAlignMove(side, pairIndex, xyz) {
 // ---- draw-your-own-box (no IFC) ------------------------------------------
 
 async function enterDraw() {
-  setStage("align");
+  await setStage("align");
   setAlignMode(true);
+  ensureAlignViews();
   S.room = null;
   S.drawPoints = [];
   S.drawClosed = false;   // polygon is an open path until you click the start / press Close
   S.customMatrix = null;
-
-  if (!S.views.splat) {
-    S.views.splat = new Viewport(el.hostSplat, { accent: 0xffb454 });
-    S.views.room = new Viewport(el.hostRoom, { accent: 0x4dd6a8 });
-  }
+  S.customBuilt = null;
   const sv = S.views.splat;
 
-  status(`<span class="spin">◐</span> loading splat…`);
+  status("Loading splat…", { busy: true });
   try {
     await loadSplatIntoAlignPane();
   } catch (e) {
+    status("Splat failed to load", { tone: "warn" });
     return toast(`Could not load the splat: ${e.message}`, true);
   }
   sv.clearMarkers();
@@ -558,6 +472,7 @@ async function enterDraw() {
     renderDrawPoints();
     rebuildDrawBox();     // move updates the box live
   }, { clickSelect: false });   // clicks add corners; selection comes from the sidebar
+  S.drawPointEditor.onSelect = () => store.slice("draw", { selected: S.drawPointEditor.selected });
 
   // Clicking the splat adds a corner along the perimeter. Clicking the first corner again (once
   // there are >=3) closes the polygon into a box -- so you trace a proper, non-crossing outline
@@ -571,12 +486,12 @@ async function enterDraw() {
       addDrawPoint(hit.point);
     }
   };
-  el.splatPoints.checked = true;   // the whole point of custom is clicking the blue dots
+  store.slice("align", { splatPoints: true });   // the whole point of custom is clicking the blue dots
   applySplatPoints(true);
   refreshDrawHandles();
   renderDrawPoints();
   rebuildDrawBox();
-  status(`${S.meshes.splatAlign.packedSplats.numSplats.toLocaleString()} splats · draw a box`);
+  status(`${S.meshes.splatAlign.packedSplats.numSplats.toLocaleString()} splats · draw a box`, { tone: "ok" });
 }
 
 function drawHandleSize() {
@@ -585,11 +500,8 @@ function drawHandleSize() {
   return Math.max(b.getSize(new THREE.Vector3()).length() * 0.01, 0.01);
 }
 
-/** Authoritative box height: the number box is unbounded; the slider is just a quick range. */
-function drawH() {
-  const v = Number(el.drawHeightNum.value);
-  return Number.isFinite(v) && v > 0 ? v : Number(el.drawHeight.value);
-}
+/** Authoritative box height (the number box is unbounded; the slider is just a quick range). */
+const drawH = () => ui().draw.height;
 
 /** Rebuild the draggable corner handles from S.drawPoints, preserving the selection. */
 function refreshDrawHandles() {
@@ -617,55 +529,49 @@ function nearStartCorner(point) {
 
 /** Close the traced outline into a box (with a self-intersection guard). */
 function closeDrawPolygon() {
+  if (S.drawPoints.length < 3) return;
   S.drawClosed = true;
   S.drawPointEditor.select(null);
   renderDrawPoints();
   rebuildDrawBox();
-  if (!el.drawClean.disabled) toast("Box closed — adjust height or drag corners, then continue");
+  if (ui().draw.canContinue) toast("Box closed — adjust height or drag corners, then continue");
+}
+
+function selectDrawPoint(i) {
+  if (!S.drawPointEditor) return;
+  S.drawPointEditor.select(S.drawPointEditor.selected === i ? null : i);
+  renderDrawPoints();
+}
+
+function deleteDrawPoint(i) {
+  S.drawPoints.splice(i, 1);
+  if (S.drawPoints.length < 3) S.drawClosed = false; // reopened
+  S.drawPointEditor.select(null);
+  refreshDrawHandles();
+  renderDrawPoints();
+  rebuildDrawBox();
 }
 
 function renderDrawPoints() {
-  el.drawPointsList.innerHTML = "";
   const closed = S.drawClosed;
-  S.drawPoints.forEach((p, i) => {
-    const d = document.createElement("div");
-    d.className = "pair" + (S.drawPointEditor?.selected === i ? " sel" : "");
-    d.style.cursor = "pointer";
-    // Flag the start corner while the outline is still open, so it's obvious what closes it.
-    const isStart = !closed && i === 0 && S.drawPoints.length >= 3;
-    d.innerHTML = `
-      <div class="idx" style="background:${hex(pairColor(i))}">${pairLabel(i)}</div>
-      <div class="co">${p.map((v) => v.toFixed(2)).join(", ")}${isStart ? " · start" : ""}</div>
-      <div class="res"></div>
-      <button class="del" title="Remove">×</button>`;
-    // Click the row -> select this corner and show its move gizmo.
-    d.addEventListener("click", (e) => {
-      if (e.target.closest(".del")) return;
-      S.drawPointEditor.select(S.drawPointEditor.selected === i ? null : i);
-      renderDrawPoints();
-    });
-    d.querySelector(".del").addEventListener("click", () => {
-      S.drawPoints.splice(i, 1);
-      if (S.drawPoints.length < 3) S.drawClosed = false; // reopened
-      S.drawPointEditor.select(null);
-      refreshDrawHandles();
-      renderDrawPoints();
-      rebuildDrawBox();
-    });
-    el.drawPointsList.append(d);
-  });
   const n = S.drawPoints.length;
-  // "Close box" appears once there are >=3 corners and the outline is still open.
-  el.drawClose.hidden = closed || n < 3;
-  // Continue is enabled only once a valid (closed, non-crossing) box exists.
+  const points = S.drawPoints.map((p, i) => ({
+    label: pairLabel(i), color: hex(pairColor(i)),
+    text: p.map((v) => v.toFixed(2)).join(", "),
+    // Flag the start corner while the outline is still open, so it's obvious what closes it.
+    isStart: !closed && i === 0 && n >= 3,
+  }));
+  const patch = { points, closed, selected: S.drawPointEditor?.selected ?? null };
+  // Continue is enabled only once a valid (closed, non-crossing) box exists; when closed,
+  // rebuildDrawBox fills the message and the flag based on validity.
   if (n < 3) {
-    el.drawClean.disabled = true;
-    el.drawOut.innerHTML = `<span>${n}/3 corners — click the floor corners around the room.</span>`;
+    Object.assign(patch, { canContinue: false,
+      msg: { tone: "neutral", text: `${n}/3 corners — click the floor corners around the room.` } });
   } else if (!closed) {
-    el.drawClean.disabled = true;
-    el.drawOut.innerHTML = `<span>${n} corners — click corner A again or press <b>Close box</b>.</span>`;
+    Object.assign(patch, { canContinue: false,
+      msg: { tone: "neutral", text: `${n} corners — click corner A again or press Close box.` } });
   }
-  // when closed, rebuildDrawBox fills drawOut + toggles drawClean based on validity
+  store.slice("draw", patch);
 }
 
 /**
@@ -674,13 +580,14 @@ function renderDrawPoints() {
  */
 function rebuildDrawBox() {
   const sv = S.views.splat;
+  if (!sv) return;
   if (S.meshes.drawBox) {
     sv.scene.remove(S.meshes.drawBox);
     S.meshes.drawBox.geometry.dispose();
     S.meshes.drawBox.material.dispose();
     S.meshes.drawBox = null;
   }
-  const P = S.drawPoints.map((p) => new THREE.Vector3(...p));
+  const P = (S.drawPoints ?? []).map((p) => new THREE.Vector3(...p));
   if (P.length < 2) return;
 
   const seg = [];
@@ -701,20 +608,20 @@ function rebuildDrawBox() {
   // closed: build the box
   let built;
   try {
-    built = buildCustomRoom(P, drawH(), el.drawFlip.checked);
+    built = buildCustomRoom(P, drawH(), ui().draw.flip);
   } catch (e) {
-    el.drawOut.innerHTML = `<span class="warn">${e.message}</span>`;
-    el.drawClean.disabled = true;
+    store.slice("draw", { canContinue: false, msg: { tone: "warn", text: e.message } });
     return;
   }
   S.customBuilt = built;
 
   const crosses = polygonSelfIntersects(built.room.footprint);
-  el.drawClean.disabled = crosses;
-  el.drawOut.innerHTML = crosses
-    ? `<span class="warn">Edges cross — drag or delete corners so the outline doesn't self-intersect.</span>`
-    : `<span class="ok">Box: ${built.room.footprint.length} walls · `
-      + `${built.room.area.toFixed(2)} units² · h ${drawH().toFixed(2)}</span>`;
+  store.slice("draw", {
+    canContinue: !crosses,
+    msg: crosses
+      ? { tone: "warn", text: "Edges cross — drag or delete corners so the outline doesn't self-intersect." }
+      : { tone: "ok", text: `${built.room.footprint.length} walls · ${built.room.area.toFixed(2)} units² · h ${drawH().toFixed(2)}` },
+  });
 
   // Extrude toward the room: up from a clicked floor, DOWN from a clicked ceiling.
   const ext = built.up.clone().multiplyScalar(drawH() * (built.fromCeiling ? -1 : 1));
@@ -735,7 +642,7 @@ async function finishDraw() {
   if (!S.customBuilt) return;
   const built = buildCustomRoom(
     S.drawPoints.map((p) => new THREE.Vector3(...p)),
-    drawH(), el.drawFlip.checked);
+    drawH(), ui().draw.flip);
   S.room = built.room;
   S.customMatrix = built.matrix4;
   // Keep the basis so a Room-height change in Clean can re-anchor a ceiling box (floor moves,
@@ -747,18 +654,24 @@ async function finishDraw() {
   await enterClean();
 }
 
-function loadSplat(url, viewport) {
+function loadSplat(url) {
   return new Promise((resolve, reject) => {
     const mesh = new SplatMesh({
       url,
+      // The API URL has no extension and Spark 2.x sniffs the type from the first streamed
+      // chunk -- our gs.sog zips put meta.json last, so the sniff never sees it. Say so.
+      fileType: SplatFileType.PCSOGSZIP,
       onLoad: () => resolve(mesh),
       onProgress: (p) => {
         const pct = typeof p === "number" ? p : p?.progress;
-        if (typeof pct === "number") status(`<span class="spin">◐</span> splat ${Math.round(pct * 100)}%`);
+        if (typeof pct === "number") status(`Loading splat… ${Math.round(pct * 100)}%`, { busy: true });
       },
     });
     mesh.quaternion.set(0, 0, 0, 1);
-    mesh.initialized.catch(reject);
+    mesh.initialized.catch((e) => {
+      window.__lastSplatError = e;   // e2e / debugging: Spark rejects with non-Error values too
+      reject(e instanceof Error ? e : new Error(String(e?.message ?? e ?? "unknown load error")));
+    });
     setTimeout(() => reject(new Error("timed out after 240 s")), 240000);
   });
 }
@@ -769,15 +682,15 @@ function applySplatPoints(on) {
   const mesh = S.meshes.splatAlign;
   if (!sv || !mesh) return;
   if (on && !S.meshes.splatPoints) {
-    status(`<span class="spin">◐</span> building point view…`);
+    status("Building point view…", { busy: true });
     // Yield a frame so the spinner paints before the ~2 s forEachSplat pass blocks the thread.
-    requestAnimationFrame(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
       const pts = buildSplatPoints(mesh);
       S.meshes.splatPoints = pts;
-      if (pts && el.splatPoints.checked) sv.scene.add(pts);
-      status(`${mesh.packedSplats.numSplats.toLocaleString()} splats · ${S.room?.name ?? ""} `
-        + `· ${(pts?.userData.pointCount ?? 0).toLocaleString()} points`);
-    });
+      if (pts && ui().align.splatPoints) sv.scene.add(pts);
+      status(`${mesh.packedSplats.numSplats.toLocaleString()} splats · `
+        + `${(pts?.userData.pointCount ?? 0).toLocaleString()} points`, { tone: "ok" });
+    }));
     return;
   }
   if (S.meshes.splatPoints) {
@@ -812,6 +725,14 @@ function addPoint(side, point, snapped) {
   renderPairs();
 }
 
+function deletePair(i) {
+  S.pairs.splice(i, 1);
+  S.solution = null;
+  clearAlignSelection();       // indices just shifted; safest to drop the selection
+  redrawMarkers();
+  renderPairs();
+}
+
 /** Draggable handles are real geometry, so they do need a world size. Markers do not. */
 function roomHandleSize() {
   const b = S.meshes.cleanRoom?.box ?? S.meshes.roomModel?.box;
@@ -819,46 +740,31 @@ function roomHandleSize() {
   return Math.max(b.getSize(new THREE.Vector3()).length() * 0.012, 0.01);
 }
 
-function renderPairs() {
-  el.pairs.innerHTML = "";
-  S.pairs.forEach((p, i) => {
-    const complete = p.splat && p.room;
-    const d = document.createElement("div");
-    d.className = "pair" + (complete ? "" : " partial") + (i === S.alignSel ? " sel" : "");
-    d.title = "Click to move this pair's points; click again to deselect";
-    const res = S.solution?.residuals?.[completeIndex(i)];
-    const bad = res != null && res > (S.solution.rms || 0) * 2 && res > 0.05;
-    d.innerHTML = `
-      <div class="idx" style="background:${hex(pairColor(i))}">${pairLabel(i)}</div>
-      <div class="co">${p.splat ? "splat ✓" : "splat …"} · ${p.room ? "room ✓" : "room …"}</div>
-      <div class="res ${bad ? "bad" : "good"}">${res != null ? res.toFixed(3) + " m" : ""}</div>
-      <button class="del" title="Remove">×</button>`;
-    // Clicking the row selects it for dragging; the × still deletes (and mustn't also select).
-    d.addEventListener("click", () => selectAlignPair(i));
-    d.querySelector(".del").addEventListener("click", (e) => {
-      e.stopPropagation();
-      S.pairs.splice(i, 1);
-      S.solution = null;
-      clearAlignSelection();       // indices just shifted; safest to drop the selection
-      redrawMarkers();
-      renderPairs();
-    });
-    el.pairs.append(d);
-  });
-
-  const complete = S.pairs.filter((p) => p.splat && p.room);
-  el.solve.disabled = complete.length < 3;
-  el.pairHint.textContent = complete.length < 3
-    ? `${complete.length}/3 pairs — click a feature in one pane, then the same feature in the other.`
-    : `${complete.length} pairs ready. Click a pair to nudge its points.`;
-  if (!S.solution) {
-    el.goClean.disabled = true;
-    el.solveOut.innerHTML = "";
-  }
-}
-
 const completeIndex = (i) =>
   S.pairs.slice(0, i + 1).filter((p) => p.splat && p.room).length - 1;
+
+function renderPairs() {
+  const pairs = S.pairs.map((p, i) => {
+    const res = p.splat && p.room ? S.solution?.residuals?.[completeIndex(i)] : null;
+    return {
+      label: pairLabel(i), color: hex(pairColor(i)),
+      splat: !!p.splat, room: !!p.room,
+      res: res ?? null,
+      bad: res != null && res > (S.solution.rms || 0) * 2 && res > 0.05,
+    };
+  });
+  const s = S.solution;
+  store.slice("align", {
+    pairs,
+    selected: S.alignSel,
+    complete: S.pairs.filter((p) => p.splat && p.room).length,
+    solution: s?.residuals?.length ? {
+      rms: s.rms, worst: Math.max(...s.residuals), scale: s.scale,
+      yawDeg: (s.rotation_euler_xyz[2] * 180) / Math.PI, good: s.rms < 0.05,
+    } : null,
+    solveError: null,
+  });
+}
 
 function redrawMarkers() {
   // Rebuilding the marker groups orphans any attached gizmo, so drop the selection first, then
@@ -877,38 +783,26 @@ function redrawMarkers() {
 /** Solve (and compose the manual refine) on the server -- the export runs the same code. */
 async function solve() {
   const pairs = S.pairs.filter((p) => p.splat && p.room);
-  el.solve.disabled = true;
+  store.slice("align", { solving: true });
   try {
-    S.solution = await api.solve(pairs, el.yawOnly.checked, S.refine, S.roomId);
+    S.solution = await api.solve(pairs, ui().align.yawOnly, S.refine, S.roomId);
   } catch (e) {
-    el.solveOut.innerHTML = `<span class="warn">${e.message}</span>`;
-    el.solve.disabled = false;
+    store.slice("align", { solving: false, solveError: e.message });
     return;
   }
-  el.solve.disabled = false;
-
-  const s = S.solution;
-  const worst = Math.max(...s.residuals);
-  const good = s.rms < 0.05;
-  el.solveOut.innerHTML = `
-    <div class="big ${good ? "ok" : "warn"}">RMS ${s.rms.toFixed(3)} m</div>
-    <table>
-      <tr><td>worst pair</td><td>${worst.toFixed(3)} m</td></tr>
-      <tr><td>scale</td><td>${s.scale.toFixed(5)}×</td></tr>
-      <tr><td>yaw</td><td>${((s.rotation_euler_xyz[2] * 180) / Math.PI).toFixed(1)}°</td></tr>
-    </table>
-    ${good ? "" : `<div class="warn" style="margin-top:5px">High RMS — check the worst pair above.</div>`}`;
+  store.slice("align", { solving: false });
   renderPairs();
-  el.goClean.disabled = false;
 }
 
 // ---------------------------------------------------------------- stage 3
 
 async function enterClean(restore = null) {
-  setStage("clean");
+  await setStage("clean");
+  store.slice("clean", { ready: false, exportResult: null, exportError: null });
   clearAlignSelection();   // the Align gizmos belong to the other panes; don't leave one attached
-  if (!S.views.clean) S.views.clean = new Viewport(el.hostClean, { accent: 0x4dd6a8 });
+  if (!S.views.clean) S.views.clean = makeView("clean", 0x4dd6a8);
   const v = S.views.clean;
+  const c0 = ui().clean;
 
   // room outline in room space (identity -- world space IS room space here)
   if (S.meshes.cleanRoom) {
@@ -919,29 +813,37 @@ async function enterClean(restore = null) {
   S.refine = restore ? normRefine(restore.refine) : IDENTITY_REFINE();
   const rm = new RoomModel(S.room);
   S.meshes.cleanRoom = rm;
+  rm.setVisible(c0.showRoom);
   v.scene.add(rm.group);
+  // Show the *new* room straight away -- header, framing, an empty crop panel -- rather than the
+  // previous one lingering for however long the SDF and splat take to arrive.
+  S.facePanel = null;
+  S.roomHeight = restore?.roomHeight ?? S.room.height;
+  publishRoomInfo();
+  store.slice("clean", { roomHeight: S.roomHeight, points: { rows: [], selected: null, rms: null, error: null } });
+  v.frame(rm.box, 1.8);
   // Real IFC solids only exist for real IFC rooms; a custom box has none, so it is forced onto
   // generated walls and the "IFC walls" toggle goes away (the Twin toggle still drives it).
-  el.showIfc.parentElement.style.display = S.customMode ? "none" : "";
   if (S.customMode) S.twinStyle.source = "generated";
+  store.slice("clean", { custom: !!S.customMode });
   applyTwinStyle();
   if (!S.customMode) attachIfcSolid(rm);
 
   // Fetch the SDF *before* the splat is in the scene. Adding the mesh first would show it
   // uncropped for however long the SDF takes, then snap -- a flash of the thing you are here
   // to remove.
-  status(`<span class="spin">◐</span> loading SDF…`);
+  status("Loading SDF…", { busy: true });
   const sdfBuf = S.customMode
     ? await api.customSdf(S.room.footprint)
     : await api.sdfBin(S.roomId);
   const { meta, dist, widx } = parseSdfBin(sdfBuf);
 
-  status(`<span class="spin">◐</span> loading splat into room space…`);
+  status("Loading splat into room space…", { busy: true });
   if (S.meshes.splatClean) {
     v.scene.remove(S.meshes.splatClean);
     S.meshes.splatClean.dispose();
   }
-  const mesh = await loadSplat(api.splatSogUrl(S.splatId), v);
+  const mesh = await loadSplat(api.splatSogUrl(S.splatId));
   mesh.matrixAutoUpdate = false;
   mesh.matrix.copy(matrix4FromRowMajor(S.solution.matrix4_row_major));
   mesh.matrixWorldNeedsUpdate = true;
@@ -953,36 +855,25 @@ async function enterClean(restore = null) {
   S.crop.attach(mesh);
   v.scene.add(mesh);
 
-  S.facePanel = new FacePanel(el.faces, S.room, onCleanCrop, restore?.crop);
+  S.facePanel = new FaceModel(S.room, onCleanCrop, restore?.crop);
   onCleanCrop(S.facePanel.params);
-  // Inserting/deleting corners and flipping only make sense for a box we authored.
-  el.flipRoom.hidden = !S.customMode;
+  S.crop.setEnabled(c0.cropOn);
 
   // ---- room height override (IFC extrusions are often not to scale)
   const h0 = restore?.roomHeight ?? S.room.height;
   S.roomHeight = h0;
-  el.roomHeight.value = String(Math.min(Math.max(h0, 0.5), 8));
-  el.roomHeightNum.value = h0.toFixed(2);
+  store.slice("clean", { roomHeight: h0 });
   // Re-apply an overridden ceiling so the crop, wireframe and (for a ceiling-anchored custom box)
   // the transform all match what was exported. No-op when the height is the room's own.
   if (Math.abs(h0 - S.room.height) > 1e-9) applyRoomHeight(h0);
 
-  setCleanHint();
-
-  // ---- twin preview: how the IFC will read over the splat in the frontend
-  if (S.twinPanel) S.twinPanel.host.innerHTML = "";
-  S.twinPanel = new TwinPanel(el.twin, S.twinStyle, () => applyTwinStyle());
-  S.twinPanel.syncEnabled(S.customMode);
+  publishRoomInfo();
   applyTwinStyle();
 
   // ---- refine: manual nudge on top of the solve
   const size = rm.box.getSize(new THREE.Vector3()).length();
-  if (S.refinePanel) S.refinePanel.host.innerHTML = "";
-  S.refinePanel = new RefinePanel(el.refine, (val) => {
-    S.refine = val;
-    scheduleResolve();
-  }, { roomSize: size });
-  S.refinePanel.set(S.refine);
+  store.slice("clean", { roomSize: size });
+  publishRefine();
 
   // ---- draggable points. For IFC: a pair's room point (drag corrects a misclick, re-solves).
   //      For a custom box: a footprint corner (drag reshapes the box, re-bakes the SDF).
@@ -992,6 +883,7 @@ async function enterClean(restore = null) {
       S.room.footprint[i] = [xyz[0], xyz[1]]; // corners live in the floor plane (z=0)
       S.room = rebuildCustomRoomShape();
       scheduleCustomSdf();
+      publishRoomInfo();
       toast(`Corner ${pairLabel(i)} moved`);
     } else {
       const complete = S.pairs.filter((p) => p.splat && p.room);
@@ -1001,16 +893,37 @@ async function enterClean(restore = null) {
         toast(`Point ${pairLabel(S.pairs.indexOf(complete[i]))} moved — re-solving`);
       }
     }
+    renderCleanPairs();
   });
+  S.pointEditor.onSelect = () => renderCleanPairs();
   refreshPointEditor();
-  el.showPoints.checked = false;
+  store.slice("clean", { showPoints: false });
   S.pointEditor.setVisible(false);
+  v.setOcclude(c0.occlude);
 
   renderCleanPairs();
-  updateRefineState();
 
-  v.frame(rm.box, 1.8);
-  status(`${mesh.packedSplats.numSplats.toLocaleString()} splats · ${S.room.name}`);
+  store.slice("clean", { ready: true });
+  status(`${mesh.packedSplats.numSplats.toLocaleString()} splats · ${S.room.name}`, { tone: "ok" });
+}
+
+function publishRoomInfo() {
+  store.slice("clean", {
+    room: { walls: S.room.footprint.length, area: S.room.area, height: S.room.height, name: S.room.name },
+    facesV: ui().clean.facesV + 1,
+  });
+}
+
+function publishRefine() {
+  const r = S.refine;
+  store.slice("clean", {
+    refine: { scale: r.scale, rotation_euler_xyz: [...r.rotation_euler_xyz], translation: [...r.translation] },
+    nudged: !isIdentityRefine(r),
+  });
+}
+
+function publishTwin() {
+  store.slice("clean", { twin: { ...S.twinStyle } });
 }
 
 /**
@@ -1021,12 +934,9 @@ async function enterClean(restore = null) {
  * toggle -- see applyTwinChrome.
  */
 function applyTwinStyle() {
-  const st = S.twinStyle;
-  S.meshes.cleanRoom?.setTwinStyle(st);
-  S.meshes.cleanRoom?.setSolidVisible(el.twinOn.checked);
-  el.twinState.textContent = st.source === "generated"
-    ? `generated · ${st.thickness.toFixed(2)} m walls`
-    : "real IFC solids";
+  S.meshes.cleanRoom?.setTwinStyle(S.twinStyle);
+  S.meshes.cleanRoom?.setSolidVisible(ui().clean.twinOn);
+  publishTwin();
   applyTwinChrome();
 }
 
@@ -1045,24 +955,36 @@ function applyTwinStyle() {
 function applyTwinChrome() {
   const v = S.views.clean;
   if (!v) return;
-  const showing = el.twinOn.checked;
+  const showing = ui().clean.twinOn;
   const st = S.twinStyle;
   v.setBackground(showing ? st.bg : null);          // null -> the tool's own dark clear colour
   // The frontend's rig (ifc-viewer.tsx): ambient 1.1, key 1.6. Its scene is y-up, so the light
   // position is swizzled into this z-up world rather than copied.
   v.setLighting(showing && st.twinLight ? { ambient: 1.1, key: 1.6, keyPos: [30, -25, 50] } : null);
-  el.twinState.classList.toggle("on", showing);
 }
 
-/**
- * The Twin toggle and the IFC-walls toggle drive one visibility state -- keep them in step.
- * Visibility-only: no geometry rebuild, just show/hide the solids and swap the pane chrome.
- */
+/** Show/hide the IFC/twin solids. Visibility-only: no geometry rebuild, just the pane chrome. */
 function setTwinVisible(on) {
-  el.twinOn.checked = on;
-  el.showIfc.checked = on;
+  store.slice("clean", { twinOn: on });
   S.meshes.cleanRoom?.setSolidVisible(on);
   applyTwinChrome();
+}
+
+/** Patch the twin look; every control writes here and the walls follow live. */
+function setTwinStyle(patch) {
+  Object.assign(S.twinStyle, patch);
+  saveTwinStyle(S.twinStyle);
+  applyTwinStyle();
+}
+
+function resetTwinStyle() {
+  setTwinStyle({ ...TWIN_DEFAULTS, source: S.twinStyle.source });
+}
+
+/** Solid shading on the digital-twin background, edges off -- how the frontend renders it. */
+function matchFrontend() {
+  setTwinStyle({ shading: "solid", opacity: 1, edges: false, bg: TWIN_FRONTEND_BG,
+    twinLight: true, floorSlab: true });
 }
 
 /**
@@ -1079,7 +1001,7 @@ async function attachIfcSolid(rm) {
     if (S.meshes.cleanRoom !== rm) return; // stage moved on while we fetched
     rm.setTwinStyle(S.twinStyle);
     rm.setSolid(S.ifcMesh.vertices, S.ifcMesh.indices);
-    rm.setSolidVisible(el.twinOn.checked);
+    rm.setSolidVisible(ui().clean.twinOn);
   } catch (e) {
     toast(`Could not load IFC solids: ${e.message}`, true);
   }
@@ -1108,15 +1030,23 @@ function applyRoomHeight(h) {
     S.meshes.cleanRoom.dispose();
     const rm = new RoomModel({ ...S.room, height: h });
     S.meshes.cleanRoom = rm;
-    rm.setVisible(el.showRoom.checked);
+    rm.setVisible(ui().clean.showRoom);
     // Generated walls follow the override (that height is what gets exported); the real IFC
     // solids don't stretch with it -- they're the building as built, so reattach at true scale.
     rm.setTwinStyle(S.twinStyle);
     if (!S.customMode && S.ifcMesh) rm.setSolid(S.ifcMesh.vertices, S.ifcMesh.indices);
-    rm.setSolidVisible(el.twinOn.checked);
+    rm.setSolidVisible(ui().clean.twinOn);
     if (S.facePanel) rm.setCropBoundary(S.facePanel.params, h);  // keep the resized box on rebuild
     v.scene.add(rm.group);
   }
+  store.slice("clean", { facesV: ui().clean.facesV + 1 });
+}
+
+/** Room height from the panel: slider and number box share this; the value is unbounded. */
+function setRoomHeight(v) {
+  if (!Number.isFinite(v) || v <= 0) return;
+  store.slice("clean", { roomHeight: v });
+  applyRoomHeight(v);
 }
 
 function refreshPointEditor() {
@@ -1133,20 +1063,21 @@ function refreshPointEditor() {
       (i) => pairColor(S.pairs.indexOf(complete[i])),
       (i) => pairLabel(S.pairs.indexOf(complete[i])));
   }
-  S.pointEditor.setVisible(el.showPoints.checked);
+  S.pointEditor.setVisible(ui().clean.showPoints);
 }
 
 // Every crop change drives both the shader (what's cut) and the wireframe box (what you see cut),
-// so resizing -- per wall or via Scale/Width/Height -- redraws the polygon live.
+// so resizing -- per wall or via Scale/Width/Depth -- redraws the polygon live.
 function onCleanCrop(p) {
   S.crop?.setParams(p);
   S.meshes.cleanRoom?.setCropBoundary(p, S.roomHeight ?? S.room.height);
+  store.slice("clean", { facesV: ui().clean.facesV + 1 });
 }
 
 /**
  * Replace a custom box's footprint with one that has a different set of walls (corner added or
  * removed, or the whole box flipped). Each new wall inherits the crop settings of `wallSrc[j]`,
- * the face panel is rebuilt for the new wall count, and the SDF re-bakes.
+ * the face model is rebuilt for the new wall count, and the SDF re-bakes.
  */
 function applyFootprintEdit(footprint, wallSrc, { swapFloorCeil = false } = {}) {
   const old = S.facePanel.params;
@@ -1161,28 +1092,22 @@ function applyFootprintEdit(footprint, wallSrc, { swapFloorCeil = false } = {}) 
   };
   S.room.footprint = footprint;
   S.room = rebuildCustomRoomShape();
-  S.facePanel = new FacePanel(el.faces, S.room, onCleanCrop, seed);
+  S.facePanel = new FaceModel(S.room, onCleanCrop, seed);
+  S.facePanel.setHeight(S.roomHeight);
   // The live crop still holds the old SDF (old wall indices) until the re-bake lands, so only
   // the wireframe follows now; scheduleCustomSdf hands the new params to the new crop.
   S.meshes.cleanRoom?.setCropBoundary(S.facePanel.params, S.roomHeight);
   scheduleCustomSdf();
-  setCleanHint();
+  publishRoomInfo();
   refreshPointEditor();
   renderCleanPairs();
-}
-
-function setCleanHint() {
-  el.cleanHint.textContent =
-    `${S.room.footprint.length} walls · ${S.room.area.toFixed(1)} m² · h ${S.room.height.toFixed(2)} m. `
-    + `Offset trims the boundary (type past the slider for more); feather fades inside it.`;
-  el.cleanHintShort.textContent = `${S.room.footprint.length} walls`;
 }
 
 /** Add a corner halfway along wall i (between corner i and the next one). */
 function addCornerAfter(i) {
   const { footprint, wallSrc } = insertCorner(S.room.footprint, i);
   applyFootprintEdit(footprint, wallSrc);
-  el.showPoints.checked = true;
+  store.slice("clean", { showPoints: true });
   S.pointEditor.setVisible(true);
   S.pointEditor.select(i + 1);                 // straight onto the new corner, ready to drag
   renderCleanPairs();
@@ -1210,7 +1135,7 @@ function flipRoomUpsideDown() {
   S.customMatrix = flipMatrix(S.customMatrix, H);
   S.customBasis = flipBasis(S.customBasis, H);
   S.refine = flipRefine(S.refine);
-  S.refinePanel?.set(S.refine);
+  publishRefine();
   const { footprint, wallSrc } = flipFootprint(S.room.footprint);
   applyFootprintEdit(footprint, wallSrc, { swapFloorCeil: true });
   runResolve();                                 // re-applies the flipped transform to the splat
@@ -1227,10 +1152,10 @@ function rebuildCustomRoomShape() {
     S.meshes.cleanRoom.dispose();
     const rm = new RoomModel(room);
     S.meshes.cleanRoom = rm;
-    rm.setVisible(el.showRoom.checked);
+    rm.setVisible(ui().clean.showRoom);
     // A reshaped footprint changes the generated walls too -- rebuild them with it.
     rm.setTwinStyle(S.twinStyle);
-    rm.setSolidVisible(el.twinOn.checked);
+    rm.setSolidVisible(ui().clean.twinOn);
     v.scene.add(rm.group);
   }
   return room;
@@ -1248,6 +1173,7 @@ function scheduleCustomSdf() {
       S.crop = new CropModifier(meta, dist, widx, S.roomHeight);
       S.crop.attach(mesh);
       S.crop.setParams(S.facePanel.params);
+      S.crop.setEnabled(ui().clean.cropOn);
     } catch (e) {
       toast(`SDF rebuild failed: ${e.message}`, true);
     }
@@ -1270,7 +1196,7 @@ async function runResolve() {
     // Custom boxes have no pairs -- the base transform is fixed; the server just composes refine.
     S.solution = S.customMode
       ? await api.solveCustom(S.customMatrix, S.refine, S.roomHeight)
-      : await api.solve(S.pairs.filter((p) => p.splat && p.room), el.yawOnly.checked, S.refine, S.roomId);
+      : await api.solve(S.pairs.filter((p) => p.splat && p.room), ui().align.yawOnly, S.refine, S.roomId);
     const m = S.meshes.splatClean;
     if (m) {
       m.matrix.copy(matrix4FromRowMajor(S.solution.matrix4_row_major));
@@ -1279,90 +1205,87 @@ async function runResolve() {
       S.crop?._invalidate();
     }
     renderCleanPairs();
-    updateRefineState();
+    publishRefine();
   } catch (e) {
-    el.cleanSolveOut.innerHTML = `<span class="warn">${e.message}</span>`;
+    store.slice("clean", { points: { ...ui().clean.points, error: e.message } });
   } finally {
     resolveBusy = false;
   }
 }
 
-function updateRefineState() {
-  const nudged = S.refinePanel && !S.refinePanel.isIdentity();
-  el.refineState.textContent = nudged ? "nudged" : "solved";
-  el.refineState.className = nudged ? "on" : "";
+/** The manual nudge from the Refine panel (degrees already converted to radians). */
+function setRefine(value) {
+  S.refine = value;
+  publishRefine();
+  scheduleResolve();
+}
+
+function resetRefine() {
+  setRefine(IDENTITY_REFINE());
 }
 
 function renderCleanPairs() {
-  if (!el.cleanPairs) return;
+  if (S.stage !== "clean" || !S.room) return;
   // Custom box: the editable points are footprint corners. IFC: they are the solved pairs.
   const rows = S.customMode
-    ? S.room.footprint.map((c, i) => ({ label: pairLabel(i), color: pairColor(i),
-        text: `${c[0].toFixed(2)}, ${c[1].toFixed(2)}`, res: null }))
+    ? S.room.footprint.map((c, i) => ({ label: pairLabel(i), color: hex(pairColor(i)),
+        text: `${c[0].toFixed(2)}, ${c[1].toFixed(2)}`, res: null, bad: false }))
     : S.pairs.filter((p) => p.splat && p.room).map((p, i) => {
         const gi = S.pairs.indexOf(p);
         const res = S.solution?.residuals?.[i];
-        return { label: pairLabel(gi), color: pairColor(gi), text: p.room.map((v) => v.toFixed(2)).join(", "),
-          res, bad: res != null && res > (S.solution.rms || 0) * 2 && res > 0.05 };
+        return { label: pairLabel(gi), color: hex(pairColor(gi)), text: p.room.map((v) => v.toFixed(2)).join(", "),
+          res: res ?? null, bad: res != null && res > (S.solution.rms || 0) * 2 && res > 0.05 };
       });
-  el.pointsState.textContent = `${rows.length} ${S.customMode ? "corners" : "pts"}`;
-  el.cleanPairs.innerHTML = "";
-  rows.forEach((row, i) => {
-    const d = document.createElement("div");
-    d.className = "cpair" + (S.pointEditor?.selected === i ? " sel" : "");
-    d.innerHTML = `
-      <div class="idx" style="background:${hex(row.color)}">${row.label}</div>
-      <div class="co">${row.text}</div>
-      <div class="res ${row.bad ? "bad" : "good"}">${row.res != null ? row.res.toFixed(3) + " m" : ""}</div>`;
-    if (S.customMode) {
-      const n = rows.length;
-      const acts = document.createElement("div");
-      acts.className = "cacts";
-      acts.innerHTML = `
-        <button class="ghost tiny" data-act="add" title="Add a corner halfway to ${pairLabel((i + 1) % n)}">+</button>
-        <button class="ghost tiny" data-act="del" title="Remove this corner" ${n <= 3 ? "disabled" : ""}>×</button>`;
-      acts.addEventListener("click", (e) => {
-        const b = e.target.closest("button");
-        if (!b) return;
-        e.stopPropagation();                    // don't also select the row
-        if (b.dataset.act === "add") addCornerAfter(i);
-        else removeCorner(i);
-      });
-      d.append(acts);
-    }
-    d.addEventListener("click", () => {
-      el.showPoints.checked = true;
-      S.pointEditor.setVisible(true);
-      S.pointEditor.select(i);
-      renderCleanPairs();
-    });
-    el.cleanPairs.append(d);
+  store.slice("clean", {
+    points: {
+      rows,
+      selected: S.pointEditor?.selected ?? null,
+      rms: S.solution && !S.customMode ? S.solution.rms : null,
+      error: null,
+    },
   });
-  if (S.solution && !S.customMode) {
-    const good = S.solution.rms < 0.05;
-    el.cleanSolveOut.innerHTML =
-      `<div class="big ${good ? "ok" : "warn"}">RMS ${S.solution.rms.toFixed(3)} m</div>`;
-  } else {
-    el.cleanSolveOut.innerHTML = "";
+}
+
+function selectCleanPoint(i) {
+  if (!S.pointEditor) return;
+  store.slice("clean", { showPoints: true });
+  S.pointEditor.setVisible(true);
+  S.pointEditor.select(S.pointEditor.selected === i ? null : i);
+  renderCleanPairs();
+}
+
+/** The toggle bar over the Clean viewport. */
+function setCleanToggle(key, on) {
+  store.slice("clean", { [key]: on });
+  if (key === "cropOn") S.crop?.setEnabled(on);
+  else if (key === "showRoom") S.meshes.cleanRoom?.setVisible(on);
+  else if (key === "twinOn") setTwinVisible(on);
+  else if (key === "showPoints") {
+    S.pointEditor?.setVisible(on);
+    renderCleanPairs();
+  } else if (key === "occlude") {
+    S.views.clean?.setOcclude(on);
+    refreshPointEditor();
   }
 }
 
 async function doExport() {
-  el.export.disabled = true;
-  el.exportOut.innerHTML = `<span class="spin">◐</span> transforming and cropping the full PLY…`;
+  store.slice("clean", { exporting: true, exportResult: null, exportError: null });
+  status("Transforming and cropping the full PLY…", { busy: true });
   try {
+    const yawOnly = ui().align.yawOnly;
     const body = {
       splat_id: S.splatId,
       refine: S.refine,
       crop: S.crop.toExportCrop(),
-      write_sog: el.wantSog.checked,
+      write_sog: ui().clean.wantSog,
       // The thickness you settled on in Twin preview is the thickness cleaned.ifc is authored at,
       // so what the frontend loads is the wall you were looking at here.
       wall_thickness: S.twinStyle.thickness,
       // Persisted so this export can be re-opened later. The sidecar already records the transform,
       // refine, crop and pairs; this fills what a lossless reload also needs.
       reopen: {
-        yaw_only: el.yawOnly.checked,
+        yaw_only: yawOnly,
         twin: { ...S.twinStyle },
         ...(S.customMode ? {
           custom: {
@@ -1384,88 +1307,100 @@ async function doExport() {
     } else {
       body.room_id = S.roomId;
       body.pairs = S.pairs.filter((p) => p.splat && p.room);
-      body.yaw_only = el.yawOnly.checked;
+      body.yaw_only = yawOnly;
     }
     const r = await api.export(body);
-    const pct = (r.kept_fraction * 100).toFixed(1);
-    const sog = r.sog_result
-      ? (r.sog_result.ok
-        ? `<div class="ok">SOG ${mb(r.sog_result.bytes)} in ${r.sog_result.seconds}s</div>`
-        : `<div class="warn">SOG failed: ${String(r.sog_result.error).slice(0, 160)}</div>`)
-      : "";
-    const ifc = r.ifc
-      ? `<div class="ok">IFC written</div>`
-      : `<div class="warn">IFC failed: ${String(r.ifc_error ?? "").slice(0, 120)}</div>`;
     // Where the files landed (directory of the sidecar).
     const dir = r.sidecar.replace(/\/[^/]+$/, "");
-    el.exportOut.innerHTML = `
-      <div class="ok">Kept ${r.splats_out.toLocaleString()} / ${r.splats_in.toLocaleString()} splats (${pct}%)</div>
-      <div>PLY ${mb(r.bytes)} in ${r.seconds}s</div>
-      ${sog}
-      ${ifc}
-      <div style="margin-top:4px;word-break:break-all;color:var(--dimmer)">${dir}</div>`;
+    store.slice("clean", {
+      exportResult: {
+        kept: r.splats_out, total: r.splats_in, pct: r.kept_fraction * 100,
+        plyBytes: r.bytes, seconds: r.seconds,
+        sog: r.sog_result ? { ok: r.sog_result.ok, bytes: r.sog_result.bytes,
+          seconds: r.sog_result.seconds, error: String(r.sog_result.error ?? "").slice(0, 160) } : null,
+        ifc: r.ifc ? { ok: true } : { ok: false, error: String(r.ifc_error ?? "").slice(0, 120) },
+        dir,
+      },
+    });
+    status(`Exported ${r.splats_out.toLocaleString()} splats`, { tone: "ok" });
     toast(`Exported to ${dir.includes("SMART_vault") ? "the vault" : dir}`);
     loadExports(); // keep the "Reopen" list current with this fresh (or overwritten) export
   } catch (e) {
-    el.exportOut.innerHTML = `<span class="warn">${e.message}</span>`;
+    store.slice("clean", { exportError: e.message });
+    status("Export failed", { tone: "warn" });
     toast(`Export failed: ${e.message}`, true);
+  } finally {
+    store.slice("clean", { exporting: false });
   }
-  el.export.disabled = false;
 }
 
-// ---------------------------------------------------------------- wiring
+// ---------------------------------------------------------------- stage navigation
 
-el.goAlign.addEventListener("click", () => enterAlign().catch((e) => toast(e.message, true)));
-el.solve.addEventListener("click", () => solve().catch((e) => toast(e.message, true)));
-el.goClean.addEventListener("click", () => enterClean().catch((e) => toast(e.message, true)));
-el.export.addEventListener("click", doExport);
-el.cropOn.addEventListener("change", () => S.crop?.setEnabled(el.cropOn.checked));
-el.showRoom.addEventListener("change", () => S.meshes.cleanRoom?.setVisible(el.showRoom.checked));
-el.showIfc.addEventListener("change", () => setTwinVisible(el.showIfc.checked));
-el.twinOn.addEventListener("change", () => setTwinVisible(el.twinOn.checked));
-el.showPoints.addEventListener("change", () => {
-  S.pointEditor?.setVisible(el.showPoints.checked);
-  renderCleanPairs();
-});
-el.refineReset.addEventListener("click", () => S.refinePanel?.reset());
-el.flipRoom.addEventListener("click", () => flipRoomUpsideDown());
-el.splatPoints.addEventListener("change", () => applySplatPoints(el.splatPoints.checked));
-
-// Draw-a-box controls
-el.drawClean.addEventListener("click", () => finishDraw().catch((e) => toast(e.message, true)));
-el.drawClose.addEventListener("click", () => { if (S.drawPoints.length >= 3) closeDrawPolygon(); });
-el.drawFlip.addEventListener("change", () => rebuildDrawBox());
-el.drawOcclude.addEventListener("change", () => {
-  S.views.splat?.setOcclude(el.drawOcclude.checked);
-  refreshDrawHandles(); // rebuild handles so their depth-test matches
-});
-el.cleanOcclude.addEventListener("change", () => {
-  S.views.clean?.setOcclude(el.cleanOcclude.checked);
-  refreshPointEditor();
-});
-function onDrawHeight(v, from) {
-  if (!Number.isFinite(v) || v <= 0) return;
-  if (from !== "range") el.drawHeight.value = String(Math.min(Math.max(v, 0.2), 8));
-  if (from !== "number") el.drawHeightNum.value = v.toFixed(2);
-  rebuildDrawBox();
+function goStage(t) {
+  if (t === "select") return void setStage("select");
+  if (t === "align" && S.splatId && S.roomId && S.roomId !== "__auto__") return enterAlign().catch(fail);
+  if (t === "clean" && S.solution) return enterClean().catch(fail);
+  toast(t === "align" ? (S.roomId === "__auto__" ? "Auto room goes straight to Clean." : "Pick a splat and a room first.")
+    : (S.customMode ? "Draw a box first." : "Solve the alignment first."), true);
 }
-el.drawHeight.addEventListener("input", () => onDrawHeight(Number(el.drawHeight.value), "range"));
-el.drawHeightNum.addEventListener("input", () => onDrawHeight(Number(el.drawHeightNum.value), "number"));
-el.drawHeightNum.addEventListener("keydown", (e) => e.stopPropagation());
 
-// Room height: slider and number box stay in sync; the box is authoritative (unbounded).
-function onHeight(v, from) {
-  if (!Number.isFinite(v) || v <= 0) return;
-  if (from !== "range") el.roomHeight.value = String(Math.min(Math.max(v, 0.5), 8));
-  if (from !== "number") el.roomHeightNum.value = v.toFixed(2);
-  applyRoomHeight(v);
+// ---------------------------------------------------------------- actions (called by React)
+
+export const actions = {
+  selectSplat, selectRoom, reopen,
+  next: () => enterNext().catch(fail),
+  goStage,
+  // align
+  setYawOnly(on) {
+    store.slice("align", { yawOnly: on });
+    if (S.solution) (S.stage === "clean" ? runResolve() : solve()).catch(fail);
+  },
+  setSplatPoints(on) {
+    store.slice("align", { splatPoints: on });
+    applySplatPoints(on);
+  },
+  selectPair: selectAlignPair,
+  deletePair,
+  clearPairs: () => resetPairs(),
+  solve: () => solve().catch(fail),
+  toClean: () => enterClean().catch(fail),
+  // draw
+  selectDrawPoint, deleteDrawPoint,
+  closeDraw: () => closeDrawPolygon(),
+  setDrawHeight(v) {
+    if (!Number.isFinite(v) || v <= 0) return;
+    store.slice("draw", { height: v });
+    rebuildDrawBox();
+  },
+  setDrawFlip(on) {
+    store.slice("draw", { flip: on });
+    rebuildDrawBox();
+  },
+  setDrawOcclude(on) {
+    store.slice("draw", { occlude: on });
+    S.views.splat?.setOcclude(on);
+    refreshDrawHandles(); // rebuild handles so their depth-test matches
+  },
+  finishDraw: () => finishDraw().catch(fail),
+  // clean
+  setCleanToggle, setRoomHeight, setRefine, resetRefine,
+  setTwinStyle, resetTwinStyle, matchFrontend,
+  selectCleanPoint, addCornerAfter, removeCorner,
+  flip: () => flipRoomUpsideDown(),
+  setWantSog: (on) => store.slice("clean", { wantSog: on }),
+  export: () => doExport(),
+  // viewports
+  setNav: (which, mode) => S.views[which]?.setNavMode(mode),
+  fitView: (which) => S.views[which]?.reframe(),
+  /** The live FaceModel for the Cleaning panel (mutable; re-render on clean.facesV). */
+  faces: () => S.facePanel,
+};
+
+export function start() {
+  boot();
 }
-el.roomHeight.addEventListener("input", () => onHeight(Number(el.roomHeight.value), "range"));
-el.roomHeightNum.addEventListener("input", () => onHeight(Number(el.roomHeightNum.value), "number"));
-el.roomHeightNum.addEventListener("keydown", (e) => e.stopPropagation());
-el.yawOnly.addEventListener("change", () => {
-  if (S.solution) (S.stage === "clean" ? runResolve() : solve()).catch((e) => toast(e.message, true));
-});
+
+// ---------------------------------------------------------------- e2e hooks
 
 /**
  * Test hooks for e2e/drive.mjs. __e2eSetPairs places pairs through the same addPoint() path a
@@ -1504,8 +1439,8 @@ window.__e2eDrawState = () => ({
   points: S.drawPoints?.length ?? 0,
   closed: !!S.drawClosed,
   boxBuilt: !!S.customBuilt,
-  cleanEnabled: !el.drawClean.disabled,
-  closeShown: !el.drawClose.hidden,
+  cleanEnabled: ui().draw.canContinue,
+  closeShown: !S.drawClosed && (S.drawPoints?.length ?? 0) >= 3,
   footprint: S.customBuilt?.room.footprint.length ?? 0,
   fromCeiling: !!S.customBuilt?.fromCeiling,
 });
@@ -1516,7 +1451,7 @@ window.__e2eMoveFootprint = (i, xyz) => {
   scheduleCustomSdf();
 };
 // Draw-stage corner editing: select from the sidebar, inspect the gizmo, move a corner.
-window.__e2eDrawSelectRow = (i) => el.drawPointsList.children[i]?.click();
+window.__e2eDrawSelectRow = (i) => selectDrawPoint(i);
 window.__e2eDrawGizmo = () => {
   const p = S.drawPointEditor;
   return p ? { selected: p.selected, attached: !!p.gizmo.object, handles: p.handles.length } : null;
@@ -1526,7 +1461,7 @@ window.__e2eOccludeState = () => {
   const v = S.stage === "clean" ? S.views.clean : S.views.splat;
   const mat = v?.markers.children[0]?.children?.[0]?.material;
   return {
-    stochastic: !!v?.spark?.defaultView?.stochastic,
+    stochastic: !!v?.spark?.material?.depthWrite,
     occlude: !!v?.occlude,
     markersDepthTest: mat ? mat.depthTest : (S.drawPointEditor?.handles[0]?.children[0]?.material.depthTest ?? null),
   };
@@ -1550,7 +1485,7 @@ window.__e2eSetFace = (key, i, v) => {
   if (i == null) p[key] = v; else p[key][i] = v;
   S.facePanel.onChange(p);
 };
-window.__e2eSetRefine = (r) => { S.refine = r; S.refinePanel?.set(r); return runResolve(); };
+window.__e2eSetRefine = (r) => { setRefine(r); return runResolve(); };
 window.__e2eMarkerCount = (which) => S.views[which]?.markers.children.length ?? -1;
 window.__e2eGizmo = () => {
   const p = S.pointEditor;
@@ -1572,7 +1507,7 @@ window.__e2eRms = () => S.solution?.rms;
 window.__e2ePointCloud = () => (S.meshes.splatPoints
   ? { inScene: !!S.meshes.splatPoints.parent, points: S.meshes.splatPoints.userData.pointCount }
   : null);
-window.__e2eSetHeight = (h) => onHeight(h, "api");
+window.__e2eSetHeight = (h) => setRoomHeight(h);
 window.__e2eRoomCornerZ = () => S.meshes.cleanRoom?.box?.max.z ?? null;
 window.__e2eIfcSolid = () => {
   // A Group of [mesh, edge lines] per part -- one part for the real IFC solids, up to three
@@ -1603,10 +1538,7 @@ window.__e2eIfcSolid = () => {
   };
 };
 window.__e2eSetTwinStyle = (patch) => {
-  Object.assign(S.twinStyle, patch);
-  S.twinPanel?.set(S.twinStyle);
-  S.twinPanel?.syncEnabled(S.customMode);
-  applyTwinStyle();
+  setTwinStyle(patch);
   return S.twinStyle;
 };
 /** Move pair `i`'s room point exactly as a gizmo drag would, and re-solve. */
@@ -1629,7 +1561,7 @@ window.__e2eDebug = () => {
     n++;
   });
   return {
-    hasWorldModifier: !!m.worldModifier,
+    hasWorldModifier: (m.worldModifiers?.length ?? 0) > 0,
     numSplats: m.packedSplats.numSplats,
     matrixWorld: m.matrixWorld.elements.map((v) => +v.toFixed(4)),
     sampledWorldBox: { min: box.min.toArray().map((v) => +v.toFixed(3)),
@@ -1649,15 +1581,7 @@ window.__e2eDebug = () => {
   };
 };
 
-for (const b of el.stages.children) {
-  b.addEventListener("click", () => {
-    const t = b.dataset.stage;
-    if (t === "select") return setStage("select");
-    if (t === "align" && S.splatId && S.roomId) return enterAlign().catch((e) => toast(e.message, true));
-    if (t === "clean" && S.solution) return enterClean().catch((e) => toast(e.message, true));
-    toast(t === "align" ? "Pick a splat and a room first."
-      : (S.customMode ? "Draw a box first." : "Solve the alignment first."), true);
-  });
-}
-
-boot();
+// The whole action table and the store, for drivers that script the app the way the UI does
+// (e2e/screenshots.mjs) instead of poking at component DOM.
+window.__e2eActions = actions;
+window.__e2eStore = store;

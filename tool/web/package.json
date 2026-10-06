@@ -2,18 +2,26 @@
   "name": "splat-ifc-aligner",
   "private": true,
   "version": "1.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "next dev -H 0.0.0.0 -p 5180",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 5180"
   },
   "dependencies": {
-    "@sparkjsdev/spark": "^0.1.9",
+    "@astryxdesign/core": "^0.6.5",
+    "@astryxdesign/theme-neutral": "^0.6.5",
+    "@sparkjsdev/spark": "^2.3.1",
+    "@stylexjs/stylex": "^0.19.1",
+    "lucide-react": "^1.52.0",
+    "next": "^16.3.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "three": "^0.180.0"
   },
   "devDependencies": {
-    "playwright": "^1.61.1",
-    "vite": "^6.0.0"
+    "@astryxdesign/cli": "^0.6.5",
+    "playwright": "^1.61.1"
   }
 }

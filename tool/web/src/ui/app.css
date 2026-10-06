@@ -1,0 +1,112 @@
+/*
+ * Only what Astryx has no component for: the full-bleed WebGL hosts, the absolute anchors that
+ * float Astryx surfaces over them, and three tiny data glyphs (pair chip, pane dot, colour swatch).
+ * Every value is a theme token; structure, surfaces and type are Astryx components.
+ */
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Stages stay mounted (their viewports are long-lived); only the active one shows. */
+.stage { height: 100%; min-height: 0; }
+.stage[hidden] { display: none; }
+
+/* ---- viewports ---------------------------------------------------------------------- */
+
+.vp {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-background-body);
+}
+.vp-host { position: absolute; inset: 0; }
+.vp-host canvas { display: block; width: 100%; height: 100%; outline: none; }
+
+.vp-split { display: flex; height: 100%; gap: 1px; background: var(--color-border); }
+
+/* Overlay anchors. Pointer events only on the floated surfaces so the canvas stays clickable. */
+.vp-anchor {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  gap: var(--spacing-2);
+  align-items: center;
+  pointer-events: none;
+}
+.vp-anchor > * { pointer-events: auto; }
+.vp-tl { top: var(--spacing-4); left: var(--spacing-4); }
+.vp-tr { top: var(--spacing-4); right: var(--spacing-4); }
+.vp-tc { top: var(--spacing-4); left: 50%; transform: translateX(-50%); }
+.vp-bl { bottom: var(--spacing-4); left: var(--spacing-4); }
+.vp-center { inset: 0; justify-content: center; }
+
+/* ---- data glyphs ----------------------------------------------------------------------- */
+
+/* Which model a pane shows: amber = splat, teal = room. The colour IS the data, hence inline. */
+.dot {
+  width: var(--spacing-2);
+  height: var(--spacing-2);
+  border-radius: var(--radius-full);
+  background: var(--dot);
+  flex: none;
+}
+
+/* Lettered pair/corner chip: the same letter and colour the point carries in 3D. */
+.chip {
+  display: inline-grid;
+  place-items: center;
+  width: var(--spacing-6);
+  height: var(--spacing-6);
+  border-radius: var(--radius-element);
+  background: var(--chip);
+  color: var(--color-on-light);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  line-height: 1;
+  flex: none;
+}
+.chip[data-ghost="true"] {
+  background: transparent;
+  color: var(--chip);
+  box-shadow: inset 0 0 0 var(--spacing-0-5) var(--chip);
+}
+
+/* Native colour input dressed as a swatch (Astryx has no colour picker). */
+.swatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-1);
+  cursor: pointer;
+}
+.swatch input[type="color"] {
+  width: var(--spacing-9);
+  height: var(--spacing-7);
+  padding: 0;
+  border: 1px solid var(--color-border-emphasized);
+  border-radius: var(--radius-element);
+  background: var(--color-background-surface);
+  cursor: pointer;
+}
+.swatch input[type="color"]::-webkit-color-swatch-wrapper { padding: var(--spacing-0-5); }
+.swatch input[type="color"]::-webkit-color-swatch { border: none; border-radius: var(--radius-inner); }
+.swatch input:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- motion ---------------------------------------------------------------------------- */
+
+/* A step's content arriving: fade + settle, on the theme's motion tokens; off for reduced motion. */
+.reveal { animation: reveal var(--duration-medium) var(--ease-standard) both; }
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(var(--spacing-1)); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .reveal { animation: none; } }

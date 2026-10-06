@@ -3,8 +3,9 @@
  *
  * Two ways to fix an alignment once you can finally see both models on top of each other:
  *
- *   RefinePanel  -- nudge the whole splat (yaw/pitch/roll, translate, scale) by hand. Rotation
- *                   is about the room centre so it nudges rather than swings.
+ *   refine value -- nudge the whole splat (yaw/pitch/roll, translate, scale) by hand. Rotation
+ *                   is about the room centre so it nudges rather than swings. Edited by the
+ *                   React RefinePanel; this module only defines its identity.
  *   PointEditor  -- drag a lettered room point onto the splat feature it should sit on, and
  *                   re-solve. You place these points in stage 2 without being able to see the
  *                   splat, so being able to correct them here is the whole idea.
@@ -13,116 +14,17 @@
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 
-const DEG = Math.PI / 180;
-
 export const IDENTITY_REFINE = () => ({
   scale: 1,
   rotation_euler_xyz: [0, 0, 0],
   translation: [0, 0, 0],
 });
 
-export class RefinePanel {
-  /** @param {HTMLElement} host @param {()=>void} onChange */
-  constructor(host, onChange, { roomSize = 5 } = {}) {
-    this.host = host;
-    this.onChange = onChange;
-    this.value = IDENTITY_REFINE();
-    // Translation range follows the room: ±half its size is plenty to nudge, never to lose it.
-    this.tRange = Math.max(roomSize * 0.5, 1);
-    this._render();
-  }
-
-  _row(label, opts) {
-    const { min, max, step, get, set, fmt } = opts;
-    const row = document.createElement("div");
-    row.className = "refine-row";
-    row.innerHTML = `<label>${label}</label>`;
-
-    const range = document.createElement("input");
-    range.type = "range";
-    range.min = min; range.max = max; range.step = step;
-    range.value = get();
-
-    const num = document.createElement("input");
-    num.type = "number";
-    num.className = "val num";
-    num.step = step;
-    num.value = fmt(get());
-
-    const commit = (v, from) => {
-      if (!Number.isFinite(v)) return;
-      set(v);
-      if (from !== "range") range.value = String(Math.min(Math.max(v, min), max));
-      if (from !== "number") num.value = fmt(v);
-      this.onChange(this.value);
-    };
-    range.addEventListener("input", () => commit(Number(range.value), "range"));
-    num.addEventListener("input", () => commit(Number(num.value), "number"));
-    num.addEventListener("keydown", (e) => e.stopPropagation());
-
-    row._sync = () => {
-      const v = get();
-      range.value = String(Math.min(Math.max(v, min), max));
-      num.value = fmt(v);
-    };
-    row.append(range, num);
-    return row;
-  }
-
-  _render() {
-    this.host.innerHTML = "";
-    // Read through `this.value` rather than capturing it: set() may swap the object, and a
-    // captured reference would leave the sliders mutating an orphan while onChange reports the
-    // untouched one.
-    const f2 = (x) => Number(x).toFixed(2);
-    const f1 = (x) => Number(x).toFixed(1);
-    this.rows = [];
-
-    const add = (r) => { this.rows.push(r); this.host.append(r); };
-
-    // Rotation in degrees at the UI, radians in the model -- the API speaks radians.
-    const rot = (i, name) => this._row(name, {
-      min: -180, max: 180, step: 0.1, fmt: f1,
-      get: () => this.value.rotation_euler_xyz[i] / DEG,
-      set: (d) => { this.value.rotation_euler_xyz[i] = d * DEG; },
-    });
-    add(rot(2, "Yaw °"));
-    add(rot(0, "Pitch °"));
-    add(rot(1, "Roll °"));
-
-    const tr = (i, name) => this._row(name, {
-      min: -this.tRange, max: this.tRange, step: 0.01, fmt: f2,
-      get: () => this.value.translation[i],
-      set: (x) => { this.value.translation[i] = x; },
-    });
-    add(tr(0, "X m"));
-    add(tr(1, "Y m"));
-    add(tr(2, "Z m"));
-
-    add(this._row("Scale ×", {
-      min: 0.5, max: 2, step: 0.001, fmt: (x) => Number(x).toFixed(3),
-      get: () => this.value.scale,
-      set: (x) => { this.value.scale = Math.max(x, 1e-6); },
-    }));
-  }
-
-  set(value) {
-    this.value = value;
-    for (const r of this.rows) r._sync();
-  }
-
-  reset() {
-    this.set(IDENTITY_REFINE());
-    this.onChange(this.value);
-  }
-
-  /** True when the user has actually nudged something. */
-  isIdentity() {
-    const v = this.value;
-    return v.scale === 1
-      && v.rotation_euler_xyz.every((x) => x === 0)
-      && v.translation.every((x) => x === 0);
-  }
+/** True when nothing has actually been nudged. */
+export function isIdentityRefine(v) {
+  return v.scale === 1
+    && v.rotation_euler_xyz.every((x) => x === 0)
+    && v.translation.every((x) => x === 0);
 }
 
 /**
@@ -140,6 +42,7 @@ export class PointEditor {
     this.onMoved = onMoved;
     this.handles = [];
     this.selected = null;
+    this.onSelect = null;
 
     this.gizmo = new TransformControls(viewport.camera, viewport.renderer.domElement);
     this.gizmo.setMode("translate");
@@ -214,6 +117,7 @@ export class PointEditor {
     this.selected = i;
     if (i == null || !this.handles[i]) this.gizmo.detach();
     else this.gizmo.attach(this.handles[i]);
+    this.onSelect?.(i);   // lets the sidebar list follow a selection made in 3D
   }
 
   clear() {

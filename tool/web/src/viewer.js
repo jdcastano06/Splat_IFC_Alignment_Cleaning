@@ -63,14 +63,31 @@ export function buildSplatPoints(mesh, { color = 0x2b6cff, maxPoints = 6_000_000
   return pts;
 }
 
+/** Resolve a CSS colour custom property on `el` to a THREE-friendly colour (or `fallback`). */
+function cssColor(el, name, fallback) {
+  try {
+    const v = getComputedStyle(el).getPropertyValue(name).trim();
+    return v ? new THREE.Color(v) : fallback;
+  } catch { return fallback; }
+}
+
 export class Viewport {
-  constructor(host, { accent = 0x4da3ff } = {}) {
+  /**
+   * @param {HTMLElement} host
+   * @param {{accent?:number, navToggle?:boolean}} opts  navToggle=false: no on-canvas Orbit/Fly
+   *   pill -- the host app draws its own control and listens on `onNavChange` instead
+   */
+  constructor(host, { accent = 0x4da3ff, navToggle = true } = {}) {
     this.host = host;
     this.accent = accent;
+    this.onNavChange = null;
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setClearColor(0x0d1013, 1);
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    // Clear to the page's own background token so the canvas is the same surface as the UI around
+    // it (falls back to the tool's old dark blue if there is no theme on the host).
+    this._defaultBg = cssColor(host, "--color-background-body", 0x0d1013);
+    this.renderer.setClearColor(this._defaultBg, 1);
     host.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
@@ -94,7 +111,7 @@ export class Viewport {
     // around the camera like an FPS, so WASD-and-look stop fighting the orbit pivot. Building the
     // toggle here means every pane (both align panes and the clean pane) gets it for free.
     this.navMode = "orbit";
-    this._buildNavToggle();
+    if (navToggle) this._buildNavToggle();
 
     // Kept as fields so the twin preview can swap in the frontend's rig (see setLighting).
     this.ambient = new THREE.AmbientLight(0xffffff, 1.6);
@@ -103,7 +120,6 @@ export class Viewport {
     this.key.position.set(2, -3, 5);
     this.scene.add(this.key);
     this._defaultLights = { ambient: 1.6, key: 1.1, keyPos: [2, -3, 5] };
-    this._defaultBg = 0x0d1013;
 
     this.markers = new THREE.Group();
     this.scene.add(this.markers);
@@ -131,7 +147,26 @@ export class Viewport {
     this.resize();
 
     this._running = true;
+    this._paused = false;
     this._tick = this._tick.bind(this);
+    requestAnimationFrame(this._tick);
+  }
+
+  /**
+   * Stop rendering while the viewport is off screen. Each pane otherwise keeps sorting and
+   * drawing its millions of splats every frame -- three hidden panes was most of the lag on the
+   * Select page. Resuming re-measures (the host may have been display:none) and draws at once.
+   */
+  pause() {
+    this._paused = true;
+    this._keys.clear();
+  }
+
+  resume() {
+    if (!this._paused) return;
+    this._paused = false;
+    this.resize();
+    this._clock.getDelta();   // drop the time spent paused so the first fly step isn't a jump
     requestAnimationFrame(this._tick);
   }
 
@@ -197,7 +232,7 @@ export class Viewport {
   }
 
   _tick() {
-    if (!this._running) return;
+    if (!this._running || this._paused) return;
     this._fly(Math.min(this._clock.getDelta(), 0.1));
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
@@ -258,7 +293,10 @@ export class Viewport {
   /** Toggle depth occlusion: splat writes depth (grainier), markers/handles hide behind it. */
   setOcclude(on) {
     this.occlude = on;
-    try { this.spark.defaultView.stochastic = on; } catch (e) { /* older Spark */ }
+    // Spark 2.x: the splat material decides whether splats write depth (0.1.x called this the
+    // viewpoint's "stochastic" mode). Markers and handles then depth-test against the splat.
+    this.spark.material.depthWrite = on;
+    this.spark.material.needsUpdate = true;
     // Retro-fit existing markers so the change is immediate.
     this.markers.traverse((o) => {
       if (o.material && "depthTest" in o.material) {
@@ -355,6 +393,7 @@ export class Viewport {
   }
 
   _syncNavToggle() {
+    this.onNavChange?.(this.navMode);
     const b = this._navToggle;
     if (!b) return;
     b.classList.toggle("fly", this.navMode === "fly");
@@ -454,6 +493,7 @@ export class Viewport {
   /** Frame a box with a comfortable margin. */
   frame(box, pad = 1.5) {
     if (box.isEmpty()) return;
+    this._lastFrame = { box: box.clone(), pad };
     const c = box.getCenter(new THREE.Vector3());
     const s = box.getSize(new THREE.Vector3());
     const radius = Math.max(s.length() * 0.5, 0.001);
@@ -469,6 +509,13 @@ export class Viewport {
     // Remembered so switching back to orbit can pivot on the model, not a point off the lens.
     this._framedCenter = c.clone();
     this._framedRadius = radius;
+  }
+
+  /** Back to the last framing -- the "fit view" button for when you have flown off into the fog. */
+  reframe() {
+    if (!this._lastFrame) return;
+    if (this.navMode === "fly") this.setNavMode("orbit");
+    this.frame(this._lastFrame.box, this._lastFrame.pad);
   }
 
   dispose() {
