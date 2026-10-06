@@ -10,3 +10,4 @@ tool/web/.next/
 tool/web/next-env.d.ts
 tool/web/e2e/shots/
 .env
+IFC/

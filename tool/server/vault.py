@@ -2,7 +2,7 @@
 
 Credentials come from the repo-root `.env` (gitignored):
 
-    VAULT_HOST=10.224.16.61
+    VAULT_HOST=nas.example.local
     VAULT_SHARE=SMART_vault
     VAULT_USER=...
     VAULT_PASSWORD=...

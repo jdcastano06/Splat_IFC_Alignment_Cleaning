@@ -8,6 +8,7 @@ offset and height error (both as a fraction of room height). Overlays go to out/
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ import align, auto_room, ply  # noqa: E402
 import cv2  # noqa: E402
 from shapely.geometry import Polygon  # noqa: E402
 
-CLEANED = Path("/Volumes/SMART_vault/06_Research_projects/Splats/_Cleaned/custom")
+CLEANED = Path(os.environ.get("OUT_ROOT", "/Volumes/SMART_vault/06_Research_projects/Splats/_Cleaned")) / "custom"
 OUT = Path(__file__).resolve().parents[2] / "out" / "auto_bench"
 
 

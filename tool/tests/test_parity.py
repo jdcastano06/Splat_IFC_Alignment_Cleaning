@@ -9,6 +9,7 @@ which is the worst case in the dataset.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,8 +34,13 @@ def _node() -> str:
 
 @pytest.fixture(scope="module")
 def room_and_grid():
-    r = ifc_room.extract(IFC / "machine_shop" / "C1-L0-MEC-02.ifc")
-    return r, sdf.bake_cached(r.footprint, ROOT.parent / ".cache" / "machine_shop")
+    # IFC/ is not shipped with the repo (building models stay private): point the test at any
+    # non-convex room you have via PARITY_IFC=/path/to/room.ifc, or it skips.
+    f = Path(os.environ.get("PARITY_IFC", IFC / "machine_shop" / "C1-L0-MEC-02.ifc"))
+    if not f.exists():
+        pytest.skip(f"no IFC room at {f} (set PARITY_IFC)")
+    r = ifc_room.extract(f)
+    return r, sdf.bake_cached(r.footprint, ROOT.parent / ".cache" / f.parent.name)
 
 
 def _run_js(grid, pts, params, tmp_path) -> np.ndarray:

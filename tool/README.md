@@ -8,18 +8,21 @@ feather the splat to the room boundary and export a cleaned PLY + SOG.
 Two processes. From `tool/`:
 
 ```bash
-# 1. backend  (reads IFC/, the splat vault, and writes out/)
-cd server && python3 -m uvicorn app:app --port 8777
+# 1. backend  (reads IFC/ and SPLAT_ROOT, writes OUT_ROOT)
+cd server && python3 -m pip install -r requirements.txt
+SPLAT_ROOT=/path/to/scans python3 -m uvicorn app:app --port 8777
 
 # 2. frontend
 cd web && npm install && npm run dev
 ```
 
-Open the URL Vite prints (default http://localhost:5180). The frontend proxies `/api` to the
-backend, so both must be up.
+The frontend is a Next.js app (React + Astryx components). Open http://localhost:5180. The
+frontend proxies `/api` to the backend, so both must be up.
 
-Splats are read from `/Volumes/SMART_vault/06_Research_projects/Splats` — override with
-`SPLAT_ROOT=/path uvicorn ...` if it lives elsewhere.
+Splats are read from `SPLAT_ROOT` (default `/Volumes/SMART_vault/06_Research_projects/Splats`),
+laid out as `<Project>/<Scan>/result/3D/model-gs-sog/gs.sog` with an optional sibling
+`model-gs-ply/gs.ply`. If the scans live on an SMB share, copy `.env.example` to `.env` and the
+backend mounts (and re-mounts) it for you.
 
 ## Workflow
 
@@ -160,7 +163,7 @@ How the room is found (`server/auto_room.py`):
    walls (never through one) and outlined, then simplified (Visvalingam) and snapped to the wall
    axes. A scan with almost no floor/ceiling (<1 % of its splats) falls back to "all dense
    structure", which never cuts the room but keeps the haze. Against the 5 hand-drawn boxes the
-   mean footprint IoU is 0.85 (0.80 with density alone; CCS_AD 0.43 → 0.67).
+   mean footprint IoU is 0.85 (0.80 with density alone; the worst scan 0.43 → 0.67).
 4. **Floater filter.** Splats larger than 1 % of the room (≈0.1–0.4 % of splats -- the bright
    needles and blobs) are dropped. It's the **Floaters** row in Clean (max size / min opacity,
    0 = off) and, like the crop, is the same formula in the preview shader and the export.
@@ -189,19 +192,14 @@ Tuning tools: `tests/tune_auto_room.py` renders plan + elevation contact sheets 
 
 ```bash
 python3 -m pytest tests/                      # unit + parity tests, incl. SOG-only export (fast)
-cd web && node e2e/drive.mjs libra_lab 4      # IFC path: real browser + GPU (needs both servers up)
-cd web && node e2e/drive-custom.mjs 4         # draw-your-own-box path, end to end
-cd web && node e2e/drive-twin.mjs libra_lab   # twin preview: wall geometry + how it renders
-cd web && node e2e/drive-twin.mjs machine_shop  # ...and again on the 57-wall room
-cd web && node e2e/drive-alignedit.mjs        # Align: select a pair, drag its points in both panes
-cd web && node e2e/drive-fly.mjs              # fly camera looks in place; orbit re-pivots cleanly
-cd web && node e2e/drive-auto.mjs "Space 7-20260701"   # ⚡ Auto room: detect -> Clean -> crop + twin
-python3 tests/smoke_export.py libra_lab       # full export against the 300 MB PLY (minutes)
+cd web && node e2e/screenshots.mjs            # drives the IFC and auto-room flows in Chrome (both servers up)
+python3 tests/smoke_export.py <room_id>      # full export against the 300 MB PLY (minutes)
 ```
 
-`tests/test_parity.py` and `e2e/drive.mjs` are the ones that matter: the first proves the export
-math equals the preview math; the second drives the real app and confirms the crop shader
-actually removes splats. `drive-twin.mjs` needs only the backend and a room (no splat vault), and
-measures the wall faces rather than a bounding box — mitred corners overshoot the box, so on a
-rotated room the box says 0.274 m where the wall is 0.200 m thick.
-```
+`tests/test_parity.py` is the one that matters: it proves the export math equals the preview
+math. `e2e/screenshots.mjs` drives the real app through its action table (`window.__e2eActions`)
+and writes the README screenshots to `docs/screenshots/`.
+
+The remaining `e2e/drive*.mjs` drivers were written against the previous (Vite) DOM and have not
+yet been ported to the Next.js UI; the engine hooks they rely on (`window.__e2e*`) still exist,
+so porting is a matter of swapping the selectors.
